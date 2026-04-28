@@ -1,0 +1,22 @@
+# Replay data — large, user-specific
+pro_replays/*
+!pro_replays/README.md
+
+# Caches
+hf_file_list_cache.json
+__pycache__/
+*.pyc
+*.pyo
+
+# Personal scratch notes
+session.txt
+
+# Python virtual env
+.venv/
+venv/
+
+# IDE / OS / Claude Code config
+.DS_Store
+.idea/
+.vscode/
+.claude/
