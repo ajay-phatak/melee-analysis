@@ -51,6 +51,14 @@ ATTACK_AIR_STATES = {
     ActionState.ATTACK_AIR_N, ActionState.ATTACK_AIR_F,
     ActionState.ATTACK_AIR_B, ActionState.ATTACK_AIR_HI, ActionState.ATTACK_AIR_LW,
 }
+ATTACK_AIR_NAME_MAP = {
+    ActionState.ATTACK_AIR_N:  "nair",
+    ActionState.ATTACK_AIR_F:  "fair",
+    ActionState.ATTACK_AIR_B:  "bair",
+    ActionState.ATTACK_AIR_HI: "uair",
+    ActionState.ATTACK_AIR_LW: "dair",
+}
+AERIALS = ("nair", "fair", "bair", "uair", "dair")
 SHIELD_STATES = {
     ActionState.GUARD_ON, ActionState.GUARD, ActionState.GUARD_OFF,
     ActionState.GUARD_SET_OFF, ActionState.GUARD_REFLECT,
@@ -113,6 +121,62 @@ LANDING_STATES = frozenset({
     ActionState.LANDING_AIR_N, ActionState.LANDING_AIR_F,
     ActionState.LANDING_AIR_B, ActionState.LANDING_AIR_HI, ActionState.LANDING_AIR_LW,
 })
+
+# ---------------------------------------------------------------------------
+# Post-landing tracker: state sets for categorizing the first action out of
+# a normal landing. We use getattr(ActionState, ...) so the script tolerates
+# slippi-lib versions that don't have every enum member.
+# ---------------------------------------------------------------------------
+def _optional_states(*names):
+    return frozenset(s for s in (getattr(ActionState, n, None) for n in names) if s is not None)
+
+POSTLAND_LANDING_STATES = AERIAL_LANDING_STATES | frozenset({ActionState.LANDING})
+
+POSTLAND_SHIELD_STATES    = _optional_states("GUARD_ON", "GUARD")
+POSTLAND_JAB_STATES       = _optional_states("ATTACK_11", "ATTACK_12", "ATTACK_13")
+POSTLAND_TILT_STATES      = _optional_states(
+    "ATTACK_S_3_HI", "ATTACK_S_3_HI_S", "ATTACK_S_3_S",
+    "ATTACK_S_3_LW_S", "ATTACK_S_3_LW",
+    "ATTACK_HI_3", "ATTACK_LW_3",
+)
+POSTLAND_SMASH_STATES     = _optional_states(
+    "ATTACK_S_4_HI", "ATTACK_S_4_HI_S", "ATTACK_S_4_S",
+    "ATTACK_S_4_LW_S", "ATTACK_S_4_LW",
+    "ATTACK_HI_4", "ATTACK_LW_4",
+)
+POSTLAND_DASH_ATTACK      = _optional_states("ATTACK_DASH")
+POSTLAND_GRAB_STATES      = _optional_states("CATCH", "CATCH_DASH")
+POSTLAND_DASH_STATES      = _optional_states("DASH", "RUN", "RUN_DIRECT")
+POSTLAND_WALK_STATES      = _optional_states("WALK_SLOW", "WALK_MIDDLE", "WALK_FAST")
+POSTLAND_CROUCH_STATES    = _optional_states("SQUAT", "SQUAT_WAIT", "SQUAT_RV")
+POSTLAND_SPOTDODGE_STATES = _optional_states("ESCAPE")
+POSTLAND_ROLL_STATES      = _optional_states("ESCAPE_F", "ESCAPE_B")
+POSTLAND_JUMP_STATES      = _optional_states("KNEE_BEND")
+
+# (category, state-set) — first match wins during classification
+POSTLAND_CATEGORY_SETS = (
+    ("shield",      POSTLAND_SHIELD_STATES),
+    ("jab",         POSTLAND_JAB_STATES),
+    ("tilt",        POSTLAND_TILT_STATES),
+    ("smash",       POSTLAND_SMASH_STATES),
+    ("dash_attack", POSTLAND_DASH_ATTACK),
+    ("grab",        POSTLAND_GRAB_STATES),
+    ("dash",        POSTLAND_DASH_STATES),
+    ("walk",        POSTLAND_WALK_STATES),
+    ("crouch",      POSTLAND_CROUCH_STATES),
+    ("spot_dodge",  POSTLAND_SPOTDODGE_STATES),
+    ("roll",        POSTLAND_ROLL_STATES),
+    ("jump",        POSTLAND_JUMP_STATES),
+)
+POSTLAND_CATEGORIES = tuple(c for c, _ in POSTLAND_CATEGORY_SETS) + ("other",)
+
+WAIT_STATE = getattr(ActionState, "WAIT", None)
+POSTLAND_AERIAL_BUCKETS = AERIALS + ("empty",)
+
+# States that abort the post-landing watch (got hit, grabbed, knocked down)
+POSTLAND_ABORT_STATES = (
+    DAMAGE_FLY_STATES | CAPTURE_STATES | THROWN_STATES | DOWN_STATES
+)
 
 # ---------------------------------------------------------------------------
 # Stage data
@@ -271,6 +335,13 @@ class TechSkillTracker:
         # Frame-1 aerials (ATTACK_AIR within 5 frames of jump)
         self.f1_attempts = 0    # aerials within 5 frames of jump
         self.f1_perfect  = 0    # aerial on exactly frame 1 of airborne
+        # Per-aerial breakdown (nair/fair/bair/uair/dair)
+        self.lc_att_by_aerial = {a: 0 for a in AERIALS}
+        self.lc_suc_by_aerial = {a: 0 for a in AERIALS}
+        self.high_by_aerial   = {a: 0 for a in AERIALS}
+        self.low_by_aerial    = {a: 0 for a in AERIALS}
+        self.f1_att_by_aerial = {a: 0 for a in AERIALS}
+        self.f1_prf_by_aerial = {a: 0 for a in AERIALS}
 
         self._prev_state      = None
         self._prev_airborne   = None
@@ -287,15 +358,21 @@ class TechSkillTracker:
         # --- L-cancel (native field, only set on first landing frame) ---
         if state in AERIAL_LANDING_STATES and (prev not in AERIAL_LANDING_STATES):
             self.low_aerials += 1
+            aerial = AERIAL_NAME_MAP[state]
+            self.low_by_aerial[aerial] += 1
             if curr.l_cancel == 1:
                 self.l_cancel_attempts += 1
                 self.l_cancel_success  += 1
+                self.lc_att_by_aerial[aerial] += 1
+                self.lc_suc_by_aerial[aerial] += 1
             elif curr.l_cancel == 2:
                 self.l_cancel_attempts += 1
+                self.lc_att_by_aerial[aerial] += 1
 
         # --- High aerials (autocancel) ---
         if prev in ATTACK_AIR_STATES and state == ActionState.LANDING:
             self.high_aerials += 1
+            self.high_by_aerial[ATTACK_AIR_NAME_MAP[prev]] += 1
 
         # --- Jump tracking: KNEE_BEND ends and player becomes airborne ---
         if prev == ActionState.KNEE_BEND and state != ActionState.KNEE_BEND and air:
@@ -327,11 +404,131 @@ class TechSkillTracker:
         # --- Frame-1 aerials: ATTACK_AIR within 5 frames of jump ---
         if self._from_jump and state in ATTACK_AIR_STATES and prev not in ATTACK_AIR_STATES:
             self.f1_attempts += 1
+            aerial = ATTACK_AIR_NAME_MAP[state]
+            self.f1_att_by_aerial[aerial] += 1
             if self._frames_airborne <= 2:  # frame 2 = input on first airborne frame (1-frame state lag)
                 self.f1_perfect += 1
+                self.f1_prf_by_aerial[aerial] += 1
 
         self._prev_state    = state
         self._prev_airborne = air
+
+
+# ---------------------------------------------------------------------------
+# 1b. Post-Landing Tracker
+# Tracks the first action a player takes out of every "normal landing"
+# (LANDING or LANDING_AIR_*), how long they spent in WAIT before acting,
+# and which aerial (if any) preceded the landing.
+# ---------------------------------------------------------------------------
+
+class PostLandingTracker:
+    TIMEOUT_FRAMES = 60
+
+    def __init__(self):
+        self.samples           = 0
+        self.total_wait_frames = 0
+        self.cat_counts        = {c: 0 for c in POSTLAND_CATEGORIES}
+        self.by_aerial = {
+            a: {
+                "samples": 0,
+                "total_wait_frames": 0,
+                "categories": {c: 0 for c in POSTLAND_CATEGORIES},
+            } for a in POSTLAND_AERIAL_BUCKETS
+        }
+        self._mode         = "IDLE"   # "IDLE" | "ARMED" | "COUNTING"
+        self._aerial       = None
+        self._wait_frames  = 0
+        self._elapsed      = 0
+        self._prev_state   = None
+
+    def feed(self, curr):
+        state = curr.state
+        prev  = self._prev_state
+
+        # If we're armed, run abort/timeout checks first
+        if self._mode != "IDLE":
+            self._elapsed += 1
+            if self._elapsed > self.TIMEOUT_FRAMES:
+                self._reset()
+                self._prev_state = state
+                return
+            if state in POSTLAND_ABORT_STATES or curr.stocks == 0:
+                self._reset()
+                self._prev_state = state
+                return
+
+        # Detect entry into a tracked landing (LANDING or LANDING_AIR_*)
+        if state in POSTLAND_LANDING_STATES and (prev not in POSTLAND_LANDING_STATES):
+            if state in AERIAL_LANDING_STATES:
+                self._aerial = AERIAL_NAME_MAP[state]
+            elif prev in ATTACK_AIR_STATES:
+                self._aerial = ATTACK_AIR_NAME_MAP[prev]
+            else:
+                self._aerial = "empty"
+            self._mode        = "ARMED"
+            self._wait_frames = 0
+            self._elapsed     = 0
+            self._prev_state  = state
+            return
+
+        # Inside a post-landing watch
+        if self._mode in ("ARMED", "COUNTING"):
+            # Still in landing animation (e.g. multi-frame LANDING_AIR_N) — keep waiting
+            if state in POSTLAND_LANDING_STATES:
+                self._prev_state = state
+                return
+            # WAIT: count and stay armed
+            if WAIT_STATE is not None and state == WAIT_STATE:
+                self._mode = "COUNTING"
+                self._wait_frames += 1
+                self._prev_state = state
+                return
+            # First non-WAIT actionable state — classify and record
+            cat = self._classify(state)
+            self._record(cat)
+            self._reset()
+            self._prev_state = state
+            return
+
+        self._prev_state = state
+
+    def _classify(self, state):
+        for cat, sset in POSTLAND_CATEGORY_SETS:
+            if state in sset:
+                return cat
+        return "other"
+
+    def _record(self, cat):
+        wf = self._wait_frames
+        self.samples += 1
+        self.total_wait_frames += wf
+        self.cat_counts[cat] += 1
+        bucket = self.by_aerial[self._aerial]
+        bucket["samples"] += 1
+        bucket["total_wait_frames"] += wf
+        bucket["categories"][cat] += 1
+
+    def _reset(self):
+        self._mode        = "IDLE"
+        self._aerial      = None
+        self._wait_frames = 0
+        self._elapsed     = 0
+
+    def summary(self):
+        avg = self.total_wait_frames / self.samples if self.samples else 0.0
+        return {
+            "samples":           self.samples,
+            "total_wait_frames": self.total_wait_frames,
+            "avg_frames_to_act": avg,
+            "categories":        dict(self.cat_counts),
+            "by_aerial": {
+                a: {
+                    "samples":           b["samples"],
+                    "total_wait_frames": b["total_wait_frames"],
+                    "categories":        dict(b["categories"]),
+                } for a, b in self.by_aerial.items()
+            },
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -740,6 +937,7 @@ class GameAnalyzer:
 
         sd = self.stage_data
         self.tech    = {i: TechSkillTracker()                       for i in self.port_indices}
+        self.postland = {i: PostLandingTracker()                    for i in self.port_indices}
         self.stgctrl = {i: StageControlTracker(sd["center_x"])      for i in self.port_indices}
         self.neutral = {i: NeutralTracker()                         for i in self.port_indices}
         self.deaths  = {i: DeathTracker()                           for i in self.port_indices}
@@ -787,6 +985,7 @@ class GameAnalyzer:
                     continue
 
                 self.tech[port_idx].feed(curr)
+                self.postland[port_idx].feed(curr)
                 self.stgctrl[port_idx].feed(curr)
                 self.neutral[port_idx].feed(curr)
                 opp_idx = self.opponent.get(port_idx, port_idx)
@@ -865,7 +1064,15 @@ class GameAnalyzer:
                     "f1_attempts":       t.f1_attempts,
                     "f1_perfect":        t.f1_perfect,
                     "f1_rate":           pct(t.f1_perfect, t.f1_attempts),
+                    # Per-aerial breakdowns
+                    "lc_att_by_aerial":  dict(t.lc_att_by_aerial),
+                    "lc_suc_by_aerial":  dict(t.lc_suc_by_aerial),
+                    "high_by_aerial":    dict(t.high_by_aerial),
+                    "low_by_aerial":     dict(t.low_by_aerial),
+                    "f1_att_by_aerial":  dict(t.f1_att_by_aerial),
+                    "f1_prf_by_aerial":  dict(t.f1_prf_by_aerial),
                 },
+                "post_landing": self.postland[port_idx].summary(),
                 "stage_control": {
                     "center_frames": sc.center_frames,
                     "total_frames":  sc.total_frames,
@@ -918,6 +1125,27 @@ def _pct_flag(rate, lo=70, hi=90):
     if rate < hi:   return f"  [~] OK"
     return              f"  [ok] Good"
 
+def _format_postland_categories(cats, total, min_pct=5):
+    """Render a sorted, top-categories string like 'shield 31% / jab 17% / ...'.
+    Categories below `min_pct`% are lumped into 'other'.
+    """
+    if total <= 0:
+        return ""
+    sorted_cats = sorted(cats.items(), key=lambda kv: -kv[1])
+    shown = []
+    other_pct = 0.0
+    for cat, count in sorted_cats:
+        if count == 0:
+            continue
+        pct_v = 100.0 * count / total
+        if cat == "other" or pct_v < min_pct:
+            other_pct += pct_v
+            continue
+        shown.append(f"{cat} {pct_v:.0f}%")
+    if other_pct >= 1:
+        shown.append(f"other {other_pct:.0f}%")
+    return " / ".join(shown)
+
 def format_report(game_data, focus_port=None):
     lines = []
     def out(s=""): lines.append(s)
@@ -958,6 +1186,21 @@ def format_report(game_data, focus_port=None):
             flag = _pct_flag(ts["l_cancel_rate"])
             out(f"    L-cancel        : {ts['l_cancel_success']}/{ts['l_cancel_attempts']}"
                 f"  ({ts['l_cancel_rate']:.0f}%){flag}")
+            # Per-aerial breakdown
+            lc_att = ts["lc_att_by_aerial"]
+            lc_suc = ts["lc_suc_by_aerial"]
+            high_by = ts["high_by_aerial"]
+            for a in AERIALS:
+                att = lc_att[a]
+                if att == 0 and high_by[a] == 0:
+                    continue
+                if att > 0:
+                    rate = 100.0 * lc_suc[a] / att
+                    rate_flag = _pct_flag(rate)
+                    suffix = f" (+{high_by[a]} high)" if high_by[a] > 0 else ""
+                    out(f"      {a:4s}        : {lc_suc[a]}/{att}  ({rate:.0f}%){rate_flag}{suffix}")
+                else:
+                    out(f"      {a:4s}        : {high_by[a]} high (autocancel only)")
         else:
             out(f"    L-cancel        : no aerial landings detected")
 
@@ -984,8 +1227,31 @@ def format_report(game_data, focus_port=None):
             flag = _pct_flag(ts["f1_rate"])
             out(f"    Frame-1 aerials : {ts['f1_perfect']}/{ts['f1_attempts']}"
                 f" on frame 1  ({ts['f1_rate']:.0f}%){flag}")
+            f1_att = ts["f1_att_by_aerial"]
+            f1_prf = ts["f1_prf_by_aerial"]
+            for a in AERIALS:
+                att = f1_att[a]
+                if att == 0:
+                    continue
+                rate = 100.0 * f1_prf[a] / att
+                out(f"      {a:4s}        : {f1_prf[a]}/{att}  ({rate:.0f}%)")
         else:
             out(f"    Frame-1 aerials : no jump aerials detected")
+
+        # Post-landing options
+        pl = p.get("post_landing")
+        if pl and pl.get("samples", 0) > 0:
+            avg = pl["avg_frames_to_act"]
+            out(f"    Post-landing    : {pl['samples']} samples, avg {avg:.1f}f to act")
+            out(f"      {_format_postland_categories(pl['categories'], pl['samples'])}")
+            for a in POSTLAND_AERIAL_BUCKETS:
+                bucket = pl["by_aerial"].get(a, {})
+                bs = bucket.get("samples", 0)
+                if bs == 0:
+                    continue
+                bavg = bucket["total_wait_frames"] / bs
+                cats_str = _format_postland_categories(bucket["categories"], bs)
+                out(f"      {a:5s} ({bs:3d}) avg {bavg:4.1f}f  {cats_str}")
 
         # --- 2. Stage Control ---
         out()
