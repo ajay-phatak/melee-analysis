@@ -6,9 +6,9 @@ Aggregates all games from a session, groups them into sets by opponent,
 and shows per-set summaries plus overall session totals.
 
 Usage:
-    python session_review.py "C:/path/to/slippi" --code WAWI#755
-    python session_review.py "C:/path/to/slippi" --code WAWI#755 --count 20
-    python session_review.py "C:/path/to/slippi" --code WAWI#755 --out session.txt
+    python session_review.py "C:/path/to/slippi" --code ABCD#123
+    python session_review.py "C:/path/to/slippi" --code ABCD#123 --count 20
+    python session_review.py "C:/path/to/slippi" --code ABCD#123 --out session.txt
 """
 
 import sys
@@ -640,7 +640,7 @@ def main():
         description="Aggregate session stats across multiple sets."
     )
     parser.add_argument("folder", help="Path to Slippi folder (or parent with YYYY-MM subfolders)")
-    parser.add_argument("--code",  type=str, required=True, help="Your Slippi connect code (e.g. WAWI#755)")
+    parser.add_argument("--code",  type=str, required=True, help="Your Slippi connect code (e.g. ABCD#123)")
     parser.add_argument("--sets",  type=int, default=None,  help="Number of most recent sets to include")
     parser.add_argument("--count", type=int, default=None,  help="Max number of recent games to include")
     parser.add_argument("--out",   type=str, default=None,  help="Write report to file")

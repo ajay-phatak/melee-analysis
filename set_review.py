@@ -5,10 +5,10 @@ Set Review
 Analyzes a set of games (multiple games vs the same opponent).
 
 Usage:
-    python set_review.py "C:/path/to/slippi" 3 --code WAWI#755
+    python set_review.py "C:/path/to/slippi" 3 --code ABCD#123
     python set_review.py "C:/path/to/slippi" 3 --port 1
-    python set_review.py "C:/path/to/slippi" --files game1.slp game2.slp --code WAWI#755
-    python set_review.py "C:/path/to/slippi" 3 --code WAWI#755 --out set.txt
+    python set_review.py "C:/path/to/slippi" --files game1.slp game2.slp --code ABCD#123
+    python set_review.py "C:/path/to/slippi" 3 --code ABCD#123 --out set.txt
 """
 
 import sys
@@ -272,7 +272,7 @@ def main():
     parser.add_argument("folder", help="Path to Slippi folder (or parent with YYYY-MM subfolders)")
     parser.add_argument("count",  type=int, nargs="?", default=None, help="Number of most recent games")
     parser.add_argument("--port", type=int, default=None, help="Your port (0-indexed)")
-    parser.add_argument("--code", type=str, default=None, help="Your Slippi connect code (e.g. WAWI#755)")
+    parser.add_argument("--code", type=str, default=None, help="Your Slippi connect code (e.g. ABCD#123)")
     parser.add_argument("--out",  type=str, default=None, help="Write report to file")
     parser.add_argument("--files", nargs="+", metavar="FILE", help="Analyze specific .slp files")
     args = parser.parse_args()

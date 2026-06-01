@@ -12,7 +12,7 @@ Parses a single .slp file and outputs a structured analysis across 5 categories:
 Usage:
     python game_review.py path/to/game.slp
     python game_review.py path/to/game.slp --port 1
-    python game_review.py path/to/game.slp --code WAWI#755
+    python game_review.py path/to/game.slp --code ABCD#123
     python game_review.py path/to/game.slp --out report.txt
 """
 
@@ -229,9 +229,8 @@ def pct(num, den):
 # Netplay / connect-code helpers
 # ---------------------------------------------------------------------------
 
-DIRECT_CODES_PATH = (
-    r"C:\Users\wizar\AppData\Roaming\Slippi Launcher"
-    r"\netplay\User\Slippi\direct-codes.json"
+DIRECT_CODES_PATH = os.path.expandvars(
+    r"%APPDATA%\Slippi Launcher\netplay\User\Slippi\direct-codes.json"
 )
 
 def get_direct_codes():
@@ -283,7 +282,7 @@ def detect_port(slp_path, my_code):
             return port_idx
 
     # Fallback: filename-based detection for tournament files
-    name = my_code.split("#")[0]  # "WAWI" from "WAWI#755"
+    name = my_code.split("#")[0]  # "ABCD" from "ABCD#123"
     fname = os.path.basename(slp_path)
     m = re.search(r'\b' + re.escape(name) + r'\s*\(([^)]+)\)', fname, re.IGNORECASE)
     if m:
@@ -1395,7 +1394,7 @@ def main():
     parser = argparse.ArgumentParser(description="Parse a Slippi .slp file for VOD review.")
     parser.add_argument("slp_file", help="Path to .slp replay file")
     parser.add_argument("--port", type=int,  default=None, help="Focus port (0-indexed)")
-    parser.add_argument("--code", type=str,  default=None, help="Your Slippi connect code (e.g. WAWI#755) for auto port detection")
+    parser.add_argument("--code", type=str,  default=None, help="Your Slippi connect code (e.g. ABCD#123) for auto port detection")
     parser.add_argument("--out",  type=str,  default=None, help="Write report to file")
     args = parser.parse_args()
 
