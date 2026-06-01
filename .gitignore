@@ -9,7 +9,7 @@ __pycache__/
 *.pyo
 
 # Personal scratch notes
-session.txt
+session*.txt
 
 # Python virtual env
 .venv/
