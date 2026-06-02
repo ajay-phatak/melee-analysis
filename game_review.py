@@ -196,6 +196,8 @@ POSTLAND_ABORT_STATES = (
 LEDGE_INTANG_FRAMES = 37
 # Hanging on the ledge (intangible, no option committed yet)
 LEDGE_HANG_STATES   = _optional_states("CLIFF_CATCH", "CLIFF_WAIT", "CLIFF_WAIT_1", "CLIFF_WAIT_2")
+# Voluntary ledge-hang wait (excludes the forced CLIFF_CATCH animation)
+LEDGE_WAIT_STATES   = _optional_states("CLIFF_WAIT", "CLIFF_WAIT_1", "CLIFF_WAIT_2")
 # "Get-up from ledge" committing options (on-stage)
 LEDGE_NEUTRAL_GETUP = _optional_states("CLIFF_CLIMB_SLOW", "CLIFF_CLIMB_QUICK")
 LEDGE_ATTACK_GETUP  = _optional_states("CLIFF_ATTACK_SLOW", "CLIFF_ATTACK_QUICK")
@@ -216,10 +218,15 @@ LEDGE_GETUP_STATES = (
 LEDGE_LAND_STATES = _optional_states("LANDING", "LANDING_FALL_SPECIAL")
 # Ledge-tech option categories (order = display order; first match wins)
 LEDGE_OPTIONS = (
-    "ledgedash", "dj_aerial", "ledge_refresh",
+    "ledgedash", "slow_ledgedash", "dj_aerial", "ledge_refresh",
     "getup_attack", "neutral_getup", "roll_getup",
     "ledge_jump_direct", "other",
 )
+
+# A ledgedash whose voluntary CLIFF_WAIT exceeds this is treated as a
+# "slow_ledgedash": the player sat on the ledge too long to be genuinely
+# trying to retain GALINT, so it's excluded from the ledgedash/GALINT stats.
+LEDGEDASH_MAX_CLIFFWAIT = 10
 
 # ---------------------------------------------------------------------------
 # Stage data
@@ -497,6 +504,7 @@ class LedgeTechTracker:
 
     def _reset_engagement(self):
         self._hang           = 0
+        self._cliffwait      = 0   # voluntary wait frames (excludes CLIFF_CATCH)
         self._since_grab     = 0   # frames since the ledge grab (drives GALINT model)
         self._release_dwell  = 0
         self._drop_elapsed   = 0
@@ -555,6 +563,10 @@ class LedgeTechTracker:
             return
 
     def _finish_ledgedash(self, curr):
+        # Sat on the ledge too long to be a genuine GALINT attempt -> not a ledgedash
+        if self._cliffwait > LEDGEDASH_MAX_CLIFFWAIT:
+            self._resolve("slow_ledgedash")
+            return
         # GALINT = ledge intangibility budget minus frames elapsed grab -> actionable
         galint = max(0, LEDGE_INTANG_FRAMES - self._since_grab)
         self._ld_distance = max(0.0, self.ledge_x - abs(curr.x))
@@ -598,10 +610,14 @@ class LedgeTechTracker:
                 self._reset_engagement()
                 self._mode = "HANG"
                 self._hang = 1
+                if state in LEDGE_WAIT_STATES:
+                    self._cliffwait = 1
 
         elif self._mode == "HANG":
             if state in LEDGE_HANG_STATES:
                 self._hang += 1
+                if state in LEDGE_WAIT_STATES:
+                    self._cliffwait += 1
             elif state in LEDGE_GETUP_STATES:
                 self._commit_hang()
                 if state in LEDGE_ATTACK_GETUP:
