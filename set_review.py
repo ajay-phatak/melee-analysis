@@ -15,7 +15,7 @@ import sys
 import os
 import argparse
 
-from game_review import analyze, detect_port
+from game_review import analyze, detect_port, LEDGE_OPTIONS
 
 FPS = 60
 
@@ -160,6 +160,19 @@ def set_report(folder, count, focus_port=None, my_code=None, files=None):
         total_f1_prf = sum(p["tech_skill"]["f1_perfect"]  for p in pdata)
         f1_rate = (100.0 * total_f1_prf / total_f1_att) if total_f1_att > 0 else None
 
+        # Ledge tech sums
+        def _lt(key): return sum(p["ledge_tech"].get(key, 0) for p in pdata if "ledge_tech" in p)
+        lt_opts = {o: sum(p["ledge_tech"]["option_counts"].get(o, 0)
+                          for p in pdata if "ledge_tech" in p) for o in LEDGE_OPTIONS}
+        lt_eng, lt_hang, lt_hinv = _lt("engagements"), _lt("hang_frames"), _lt("hang_invuln_frames")
+        lt_dwell, lt_dwn = _lt("dwell_frames"), _lt("dwell_n")
+        lt_ld, lt_gsum, lt_gn = _lt("ledgedash_count"), _lt("galint_sum"), _lt("galint_n")
+        lt_gmax = max((p["ledge_tech"].get("galint_max", 0) for p in pdata if "ledge_tech" in p), default=0)
+        lt_gpos = _lt("galint_pos")
+        lt_react, lt_fsum, lt_fn = _lt("ld_reaction_sum"), _lt("ld_fall_sum"), _lt("ld_fall_n")
+        lt_wl = _lt("ld_waveland_sum")
+        lt_dist = sum(p["ledge_tech"].get("ld_distance_sum", 0.0) for p in pdata if "ledge_tech" in p)
+
         dealt_seqs = []
         for g in port_games:
             opp_ports = [pi for pi in g["port_order"] if pi != port_idx]
@@ -199,6 +212,24 @@ def set_report(folder, count, focus_port=None, my_code=None, files=None):
         out(f"    L-cancel rate     : {lc_s}{flag(lc_rate)}")
         out(f"    Wavedash rate     : {wd_s}{flag(wd_rate)}")
         out(f"    Frame-1 aerials   : {f1_s}{flag(f1_rate)}")
+        if lt_eng > 0:
+            dwell_avg = lt_dwell / lt_dwn if lt_dwn else 0.0
+            inv = f"{100.0 * lt_hinv / lt_hang:.0f}% invuln on ledge" if lt_hang > 0 else "invuln n/a"
+            out(f"    Ledge tech        : {lt_eng} grabs, avg {dwell_avg:.0f}f to act, {inv}")
+            if lt_ld > 0:
+                galint = lt_gsum / lt_gn if lt_gn else 0.0
+                gpct   = 100.0 * lt_gpos / lt_gn if lt_gn else 0.0
+                react  = lt_react / lt_ld
+                wland  = lt_wl / lt_ld
+                fall   = (lt_fsum / lt_fn) if lt_fn else 0.0
+                dist   = lt_dist / lt_gn if lt_gn else 0.0
+                out(f"      Ledgedash       : {lt_ld} ledgedashes, GALINT avg {galint:.0f}f"
+                    f" best {lt_gmax}f ({gpct:.0f}% keep invuln)")
+                out(f"                        reaction {react:.0f}f, fall {fall:.0f}f, "
+                    f"waveland {wland:.0f}f, dist {dist:.1f}")
+            opt_str = ", ".join(f"{o} {lt_opts[o]}" for o in LEDGE_OPTIONS if lt_opts.get(o, 0) > 0)
+            err = "  [!] ledge-jump = tech error" if lt_opts.get("ledge_jump_direct", 0) > 0 else ""
+            out(f"      Options         : {opt_str}{err}")
         out(f"    Avg punish dealt  : {avg_punish_dealt:.1f}%  ({len(dealt_seqs)} sequences)")
         if dealt_seqs:
             out(f"    Punish outcomes   : {kills} kills / {edgeguards} edgeguards / {resets} resets  ({100*kills//len(dealt_seqs)}% kill rate)")

@@ -19,6 +19,7 @@ import argparse
 from game_review import (
     analyze, detect_port, get_netplay_info, get_direct_codes,
     AERIALS, POSTLAND_CATEGORIES, POSTLAND_AERIAL_BUCKETS,
+    LEDGE_OPTIONS, LEDGE_INTANG_FRAMES,
     _format_postland_categories,
 )
 
@@ -168,11 +169,41 @@ def aggregate_stats(game_summaries):
         "by_aerial": pl_by_aerial,
     }
 
+    # Ledge-tech aggregation (sum raw counts across games)
+    def _lt_sum(key):
+        return sum(p["ledge_tech"].get(key, 0) for p in pdata if "ledge_tech" in p)
+    lt_option_counts = {
+        o: sum(p["ledge_tech"]["option_counts"].get(o, 0)
+               for p in pdata if "ledge_tech" in p)
+        for o in LEDGE_OPTIONS
+    }
+    ledge_tech = {
+        "engagements":        _lt_sum("engagements"),
+        "option_counts":      lt_option_counts,
+        "hang_frames":        _lt_sum("hang_frames"),
+        "hang_invuln_frames": _lt_sum("hang_invuln_frames"),
+        "dwell_frames":       _lt_sum("dwell_frames"),
+        "dwell_n":            _lt_sum("dwell_n"),
+        "ledgedash_count":    _lt_sum("ledgedash_count"),
+        "galint_sum":         _lt_sum("galint_sum"),
+        "galint_n":           _lt_sum("galint_n"),
+        "galint_max":         max((p["ledge_tech"].get("galint_max", 0)
+                                   for p in pdata if "ledge_tech" in p), default=0),
+        "galint_pos":         _lt_sum("galint_pos"),
+        "ld_reaction_sum":    _lt_sum("ld_reaction_sum"),
+        "ld_fall_sum":        _lt_sum("ld_fall_sum"),
+        "ld_fall_n":          _lt_sum("ld_fall_n"),
+        "ld_waveland_sum":    _lt_sum("ld_waveland_sum"),
+        "ld_distance_sum":    sum(p["ledge_tech"].get("ld_distance_sum", 0.0)
+                                  for p in pdata if "ledge_tech" in p),
+    }
+
     def safe_pct(a, b): return 100.0 * a / b if b > 0 else None
 
     return {
         "games":          n,
         "wins":           wins,
+        "ledge_tech":     ledge_tech,
         "losses":         n - wins,
         "avg_stocks_lost": sum(p["stocks_lost"] for p in pdata) / n,
         "avg_shield_s":   sum(p["neutral"]["shield_seconds"] for p in pdata) / n,
@@ -299,6 +330,11 @@ def write_stats_block(stats, out, indent="    "):
 
     out(f"{indent}Avg stocks lost   : {stats['avg_stocks_lost']:.1f}")
     out(f"{indent}Avg shield time   : {stats['avg_shield_s']:.1f}s/game")
+    out(f"{indent}Avg crouch time   : {stats['avg_crouch_s']:.1f}s/game")
+    _def = stats['avg_shield_s'] + stats['avg_crouch_s']
+    if _def > 0:
+        _sh = 100.0 * stats['avg_shield_s'] / _def
+        out(f"{indent}Shield vs crouch  : {_sh:.0f}% shield / {100 - _sh:.0f}% crouch  (of defensive time)")
     out(f"{indent}Center stage      : {stats['avg_center_pct']:.1f}%{flag(stats['avg_center_pct'], 40, 60)}")
     out(f"{indent}Aerials           : {stats['high_aerials']} high / {stats['low_aerials']} low (L-cancel window)")
     out(f"{indent}L-cancel rate     : {lc_s}{flag(stats['lc_rate'])}")
@@ -327,6 +363,32 @@ def write_stats_block(stats, out, indent="    "):
             prf = stats["f1_prf_by_aerial"][a]
             rate = 100.0 * prf / att
             out(f"{indent}  {a:4s}            : {prf}/{att}  ({rate:.0f}%)")
+    # Ledge tech
+    lt = stats.get("ledge_tech")
+    if lt and lt.get("engagements", 0) > 0:
+        eng = lt["engagements"]
+        dwell_avg = lt["dwell_frames"] / lt["dwell_n"] if lt["dwell_n"] else 0.0
+        inv = (f"{100.0 * lt['hang_invuln_frames'] / lt['hang_frames']:.0f}% invuln on ledge"
+               if lt["hang_frames"] > 0 else "invuln n/a")
+        out(f"{indent}Ledge tech        : {eng} grabs, avg {dwell_avg:.0f}f to act, {inv}")
+        ld = lt["ledgedash_count"]
+        if ld > 0:
+            galint = lt["galint_sum"] / lt["galint_n"] if lt["galint_n"] else 0.0
+            gpct   = 100.0 * lt["galint_pos"] / lt["galint_n"] if lt["galint_n"] else 0.0
+            react  = lt["ld_reaction_sum"] / ld
+            wland  = lt["ld_waveland_sum"] / ld
+            fall   = (lt["ld_fall_sum"] / lt["ld_fall_n"]) if lt["ld_fall_n"] else 0.0
+            dist   = lt["ld_distance_sum"] / lt["galint_n"] if lt["galint_n"] else 0.0
+            out(f"{indent}  Ledgedash       : {ld} ledgedashes, GALINT avg {galint:.0f}f"
+                f" best {lt['galint_max']}f ({gpct:.0f}% keep invuln)")
+            out(f"{indent}                    reaction {react:.0f}f, fall {fall:.0f}f, "
+                f"waveland {wland:.0f}f, dist {dist:.1f}")
+        opt_str = ", ".join(
+            f"{o} {lt['option_counts'][o]}"
+            for o in LEDGE_OPTIONS if lt["option_counts"].get(o, 0) > 0
+        )
+        err = "  [!] ledge-jump = tech error" if lt["option_counts"].get("ledge_jump_direct", 0) > 0 else ""
+        out(f"{indent}  Options         : {opt_str}{err}")
     # Post-landing options
     pl = stats.get("post_landing")
     if pl and pl.get("samples", 0) > 0:

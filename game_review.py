@@ -70,7 +70,8 @@ CLIFF_STATES = {
     ActionState.CLIFF_ESCAPE_SLOW, ActionState.CLIFF_ESCAPE_QUICK,
     ActionState.CLIFF_JUMP_SLOW_1, ActionState.CLIFF_JUMP_SLOW_2,
     ActionState.CLIFF_JUMP_QUICK_1, ActionState.CLIFF_JUMP_QUICK_2,
-}
+} | {s for s in (getattr(ActionState, n, None)
+                 for n in ("CLIFF_WAIT_1", "CLIFF_WAIT_2")) if s is not None}
 RECOVERY_STATES = {
     ActionState.FALL_SPECIAL, ActionState.FALL_SPECIAL_F,
     ActionState.FALL_SPECIAL_B, ActionState.ESCAPE_AIR,
@@ -176,6 +177,48 @@ POSTLAND_AERIAL_BUCKETS = AERIALS + ("empty",)
 # States that abort the post-landing watch (got hit, grabbed, knocked down)
 POSTLAND_ABORT_STATES = (
     DAMAGE_FLY_STATES | CAPTURE_STATES | THROWN_STATES | DOWN_STATES
+)
+
+# ---------------------------------------------------------------------------
+# Ledge-tech state sets (for LedgeTechTracker)
+# ---------------------------------------------------------------------------
+# Fresh ledge-grab intangibility budget (frames). Slippi replays don't store
+# the live intangibility timer, so GALINT and ledge-stall invuln% are derived
+# from this fixed budget: a fresh grab is intangible for this many frames,
+# counting down every frame (on or off ledge) until the player is actionable.
+# GALINT = max(0, LEDGE_INTANG_FRAMES - frames_from_grab_to_grounded_actionable).
+#
+# The budget is counted from the FIRST frame of CLIFF_CATCH. The catch animation
+# itself eats some of these frames (~7 for most of the cast, but only ~3 for
+# Link, giving him more actionable intangibility). Because frames_from_grab is
+# measured from the real CLIFF_CATCH onset rather than assuming a fixed catch
+# length, this 37-frame budget works correctly for every character incl. Link.
+LEDGE_INTANG_FRAMES = 37
+# Hanging on the ledge (intangible, no option committed yet)
+LEDGE_HANG_STATES   = _optional_states("CLIFF_CATCH", "CLIFF_WAIT", "CLIFF_WAIT_1", "CLIFF_WAIT_2")
+# "Get-up from ledge" committing options (on-stage)
+LEDGE_NEUTRAL_GETUP = _optional_states("CLIFF_CLIMB_SLOW", "CLIFF_CLIMB_QUICK")
+LEDGE_ATTACK_GETUP  = _optional_states("CLIFF_ATTACK_SLOW", "CLIFF_ATTACK_QUICK")
+LEDGE_ROLL_GETUP    = _optional_states("CLIFF_ESCAPE_SLOW", "CLIFF_ESCAPE_QUICK")
+# Direct ledge jump (CLIFF_JUMP_*) — almost always a botched ledgedash, flagged as a tech error
+LEDGE_JUMP_DIRECT   = _optional_states(
+    "CLIFF_JUMP_SLOW_1", "CLIFF_JUMP_SLOW_2", "CLIFF_JUMP_QUICK_1", "CLIFF_JUMP_QUICK_2"
+)
+# Double jump (used mid-ledgedash and for dj-aerials)
+DOUBLE_JUMP_STATES  = _optional_states("JUMP_AERIAL_F", "JUMP_AERIAL_B")
+# Falling after releasing the ledge (start of a ledgedash / dj-aerial drop)
+LEDGE_DROP_FALL_STATES = _optional_states("FALL", "FALL_AERIAL", "FALL_AERIAL_F", "FALL_AERIAL_B")
+# Any committing get-up state (leaving the hang via a ground option)
+LEDGE_GETUP_STATES = (
+    LEDGE_NEUTRAL_GETUP | LEDGE_ATTACK_GETUP | LEDGE_ROLL_GETUP | LEDGE_JUMP_DIRECT
+)
+# Landing states that finish a waveland (ledgedash) onto the stage
+LEDGE_LAND_STATES = _optional_states("LANDING", "LANDING_FALL_SPECIAL")
+# Ledge-tech option categories (order = display order; first match wins)
+LEDGE_OPTIONS = (
+    "ledgedash", "dj_aerial", "ledge_refresh",
+    "getup_attack", "neutral_getup", "roll_getup",
+    "ledge_jump_direct", "other",
 )
 
 # ---------------------------------------------------------------------------
@@ -411,6 +454,212 @@ class TechSkillTracker:
 
         self._prev_state    = state
         self._prev_airborne = air
+
+
+# ---------------------------------------------------------------------------
+# 1a. Ledge Tech Tracker
+# Classifies what a player does off every ledge grab and measures ledgedash
+# quality via GALINT (grounded actionable ledge intangibility).
+#
+# A "ledge engagement" begins when the player enters a hang state (CLIFF_CATCH/
+# CLIFF_WAIT) and ends when they commit to an option:
+#   ledgedash, dj_aerial, ledge_refresh (regrab), getup_attack, neutral_getup,
+#   roll_getup, ledge_jump_direct (botched-ledgedash tech error), other.
+# For ledgedashes we also record the 3 timing components (release reaction,
+# fall frames before the double jump, waveland landing-lag) and the inward
+# distance travelled, so the GALINT-vs-distance tradeoff is visible.
+# ---------------------------------------------------------------------------
+
+class LedgeTechTracker:
+    DROP_TIMEOUT = 60   # max frames after ledge release to resolve a drop option
+
+    def __init__(self, ledge_x):
+        self.ledge_x            = ledge_x
+        self.engagements        = 0
+        self.option_counts      = {o: 0 for o in LEDGE_OPTIONS}
+        self.hang_frames        = 0
+        self.hang_invuln_frames = 0
+        self.dwell_frames       = 0      # summed over resolved engagements
+        self.dwell_n            = 0
+        self.ledgedash_count    = 0
+        self.galint_sum         = 0
+        self.galint_n           = 0
+        self.galint_max         = 0      # best (highest) GALINT seen
+        self.galint_pos         = 0      # ledgedashes that retained any invuln (GALINT > 0)
+        self.ld_reaction_sum    = 0      # release dwell (catch -> release) per ledgedash
+        self.ld_fall_sum        = 0      # release -> double jump
+        self.ld_fall_n          = 0
+        self.ld_waveland_sum    = 0      # land -> grounded-actionable
+        self.ld_distance_sum    = 0.0    # inward distance from ledge at actionable
+        self._mode = "IDLE"
+        self._prev = None
+        self._reset_engagement()
+
+    def _reset_engagement(self):
+        self._hang           = 0
+        self._since_grab     = 0   # frames since the ledge grab (drives GALINT model)
+        self._release_dwell  = 0
+        self._drop_elapsed   = 0
+        self._dj_done        = False
+        self._fall_before_dj = 0
+        self._airdodged      = False
+        self._waveland_lag   = 0
+        self._ld_distance    = 0.0
+
+    def _commit_hang(self):
+        """Leaving the hang: bank hang frames + modeled invuln, freeze dwell."""
+        self.hang_frames += self._hang
+        # Ledge intangibility is a fixed budget spent from the grab, so the first
+        # LEDGE_INTANG_FRAMES of the hang are intangible (deterministic model).
+        self.hang_invuln_frames += min(self._hang, LEDGE_INTANG_FRAMES)
+        self._release_dwell = self._hang
+
+    def _resolve(self, opt):
+        """Finish a (non-ledgedash) engagement and return to IDLE."""
+        self.option_counts[opt] += 1
+        self.dwell_frames += self._release_dwell
+        self.dwell_n      += 1
+        self._mode = "IDLE"
+        self._reset_engagement()
+
+    def _maybe_dj(self, curr):
+        if self._dj_done:
+            return
+        consumed = (
+            self._prev is not None
+            and curr.jumps is not None and self._prev.jumps is not None
+            and curr.jumps < self._prev.jumps
+        )
+        if curr.state in DOUBLE_JUMP_STATES or consumed:
+            self._dj_done = True
+            self._fall_before_dj = self._drop_elapsed
+
+    def _maybe_drop_resolve(self, curr):
+        if self._mode != "DROP":
+            return
+        state = curr.state
+        if state == ActionState.ESCAPE_AIR:
+            self._airdodged = True
+            return
+        if self._airdodged and state in LEDGE_LAND_STATES:
+            # airdodge -> land on stage = waveland -> ledgedash; score GALINT next
+            self._mode = "WAVELAND"
+            self._waveland_lag = 0
+            return
+        if self._dj_done and state in ATTACK_AIR_STATES:
+            self._resolve("dj_aerial")
+            return
+        if (not self._airdodged) and state in LEDGE_LAND_STATES:
+            # fell and landed without a waveland (not a ledgedash)
+            self._resolve("other")
+            return
+
+    def _finish_ledgedash(self, curr):
+        # GALINT = ledge intangibility budget minus frames elapsed grab -> actionable
+        galint = max(0, LEDGE_INTANG_FRAMES - self._since_grab)
+        self._ld_distance = max(0.0, self.ledge_x - abs(curr.x))
+        self.ledgedash_count += 1
+        self.option_counts["ledgedash"] += 1
+        self.ld_reaction_sum += self._release_dwell
+        self.ld_waveland_sum += self._waveland_lag
+        if self._dj_done:
+            self.ld_fall_sum += self._fall_before_dj
+            self.ld_fall_n   += 1
+        self.galint_sum      += galint
+        self.galint_n        += 1
+        if galint > self.galint_max:
+            self.galint_max = galint
+        if galint > 0:
+            self.galint_pos += 1
+        self.ld_distance_sum += self._ld_distance
+        self.dwell_frames += self._release_dwell
+        self.dwell_n      += 1
+        self._mode = "IDLE"
+        self._reset_engagement()
+
+    def feed(self, curr):
+        state = curr.state
+
+        # Got hit / grabbed / knocked down / dead mid-engagement -> abandon it
+        if state in POSTLAND_ABORT_STATES:
+            self._mode = "IDLE"
+            self._reset_engagement()
+            self._prev = curr
+            return
+
+        # Frames since the ledge grab accumulate across all active phases and
+        # drive the deterministic GALINT / ledge-invuln model.
+        if self._mode in ("HANG", "DROP", "WAVELAND"):
+            self._since_grab += 1
+
+        if self._mode == "IDLE":
+            if state in LEDGE_HANG_STATES:
+                self.engagements += 1
+                self._reset_engagement()
+                self._mode = "HANG"
+                self._hang = 1
+
+        elif self._mode == "HANG":
+            if state in LEDGE_HANG_STATES:
+                self._hang += 1
+            elif state in LEDGE_GETUP_STATES:
+                self._commit_hang()
+                if state in LEDGE_ATTACK_GETUP:
+                    self._resolve("getup_attack")
+                elif state in LEDGE_NEUTRAL_GETUP:
+                    self._resolve("neutral_getup")
+                elif state in LEDGE_ROLL_GETUP:
+                    self._resolve("roll_getup")
+                else:
+                    self._resolve("ledge_jump_direct")
+            else:
+                # released the ledge by dropping off
+                self._commit_hang()
+                self._mode = "DROP"
+                self._drop_elapsed = 0
+                self._maybe_dj(curr)
+                self._maybe_drop_resolve(curr)
+
+        elif self._mode == "DROP":
+            self._drop_elapsed += 1
+            if state in LEDGE_HANG_STATES:
+                self._resolve("ledge_refresh")
+            else:
+                self._maybe_dj(curr)
+                self._maybe_drop_resolve(curr)
+                if self._mode == "DROP" and self._drop_elapsed > self.DROP_TIMEOUT:
+                    self._resolve("other")
+
+        elif self._mode == "WAVELAND":
+            self._waveland_lag += 1
+            if state not in LEDGE_LAND_STATES and not curr.airborne:
+                # first grounded-actionable frame out of the waveland
+                self._finish_ledgedash(curr)
+            elif curr.airborne or self._waveland_lag > self.DROP_TIMEOUT:
+                # took back off / abnormal -> still score it as a ledgedash
+                self._finish_ledgedash(curr)
+
+        self._prev = curr
+
+    def summary(self):
+        return {
+            "engagements":        self.engagements,
+            "option_counts":      dict(self.option_counts),
+            "hang_frames":        self.hang_frames,
+            "hang_invuln_frames": self.hang_invuln_frames,
+            "dwell_frames":       self.dwell_frames,
+            "dwell_n":            self.dwell_n,
+            "ledgedash_count":    self.ledgedash_count,
+            "galint_sum":         self.galint_sum,
+            "galint_n":           self.galint_n,
+            "galint_max":         self.galint_max,
+            "galint_pos":         self.galint_pos,
+            "ld_reaction_sum":    self.ld_reaction_sum,
+            "ld_fall_sum":        self.ld_fall_sum,
+            "ld_fall_n":          self.ld_fall_n,
+            "ld_waveland_sum":    self.ld_waveland_sum,
+            "ld_distance_sum":    self.ld_distance_sum,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -936,6 +1185,7 @@ class GameAnalyzer:
 
         sd = self.stage_data
         self.tech    = {i: TechSkillTracker()                       for i in self.port_indices}
+        self.ledgetech = {i: LedgeTechTracker(sd["ledge_x"])        for i in self.port_indices}
         self.postland = {i: PostLandingTracker()                    for i in self.port_indices}
         self.stgctrl = {i: StageControlTracker(sd["center_x"])      for i in self.port_indices}
         self.neutral = {i: NeutralTracker()                         for i in self.port_indices}
@@ -984,6 +1234,7 @@ class GameAnalyzer:
                     continue
 
                 self.tech[port_idx].feed(curr)
+                self.ledgetech[port_idx].feed(curr)
                 self.postland[port_idx].feed(curr)
                 self.stgctrl[port_idx].feed(curr)
                 self.neutral[port_idx].feed(curr)
@@ -1032,6 +1283,7 @@ class GameAnalyzer:
         ports = {}
         for port_idx in self.port_indices:
             t  = self.tech[port_idx]
+            lt = self.ledgetech[port_idx]
             sc = self.stgctrl[port_idx]
             n  = self.neutral[port_idx]
             d  = self.deaths[port_idx]
@@ -1071,6 +1323,7 @@ class GameAnalyzer:
                     "f1_att_by_aerial":  dict(t.f1_att_by_aerial),
                     "f1_prf_by_aerial":  dict(t.f1_prf_by_aerial),
                 },
+                "ledge_tech": lt.summary(),
                 "post_landing": self.postland[port_idx].summary(),
                 "stage_control": {
                     "center_frames": sc.center_frames,
@@ -1236,6 +1489,37 @@ def format_report(game_data, focus_port=None):
                 out(f"      {a:4s}        : {f1_prf[a]}/{att}  ({rate:.0f}%)")
         else:
             out(f"    Frame-1 aerials : no jump aerials detected")
+
+        # Ledge tech
+        lt = p.get("ledge_tech")
+        if lt and lt.get("engagements", 0) > 0:
+            eng = lt["engagements"]
+            dwell_avg = lt["dwell_frames"] / lt["dwell_n"] if lt["dwell_n"] else 0.0
+            if lt["hang_frames"] > 0:
+                inv = f"{100.0 * lt['hang_invuln_frames'] / lt['hang_frames']:.0f}% invuln on ledge"
+            else:
+                inv = "invuln n/a"
+            out(f"    Ledge tech      : {eng} grabs, avg {dwell_avg:.0f}f to act, {inv}")
+            ld = lt["ledgedash_count"]
+            if ld > 0:
+                gpct = 100.0 * lt["galint_pos"] / lt["galint_n"] if lt["galint_n"] else 0.0
+                head = (f"{ld} ledgedashes, GALINT avg {lt['galint_sum'] / lt['galint_n']:.0f}f"
+                        f" best {lt['galint_max']}f ({gpct:.0f}% keep invuln)")
+                react = lt["ld_reaction_sum"] / ld
+                wland = lt["ld_waveland_sum"] / ld
+                fall  = (lt["ld_fall_sum"] / lt["ld_fall_n"]) if lt["ld_fall_n"] else 0.0
+                sub = f"reaction {react:.0f}f, fall {fall:.0f}f, waveland {wland:.0f}f"
+                if lt["galint_n"] > 0:
+                    sub += f", dist {lt['ld_distance_sum'] / lt['galint_n']:.1f}"
+                out(f"      Ledgedash     : {head}  ({sub})")
+            opt_str = ", ".join(
+                f"{o} {lt['option_counts'][o]}"
+                for o in LEDGE_OPTIONS if lt["option_counts"].get(o, 0) > 0
+            )
+            err = "  [!] ledge-jump = tech error" if lt["option_counts"].get("ledge_jump_direct", 0) > 0 else ""
+            out(f"      Options       : {opt_str}{err}")
+        else:
+            out(f"    Ledge tech      : no ledge grabs detected")
 
         # Post-landing options
         pl = p.get("post_landing")
