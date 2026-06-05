@@ -85,10 +85,29 @@ def _matchup_key(g):
     return (opp_code, my_char, opp_char)
 
 
-def group_into_sets(game_summaries):
-    """Group consecutive games of the same matchup into sets.
-    A set breaks when the opponent OR either player's character changes.
+def group_into_sets(game_summaries, pool=False):
+    """Group games into matchup sets, keyed by (opponent, my char, opp char).
+
+    Default: a set is a run of *consecutive* games of one matchup, so the same
+    matchup played in two blocks (e.g. Falco, then Fox, then Falco again) yields
+    two separate Falco sets.
+
+    pool=True: all games of a matchup are pooled into a single set regardless of
+    order, so the two Falco blocks above merge into one. Pooled sets are ordered
+    by first appearance.
+
     Uses per-game my_port stored in game_data["my_port"]."""
+    if pool:
+        groups = {}
+        order = []
+        for g in game_summaries:
+            key = _matchup_key(g)
+            if key not in groups:
+                groups[key] = []
+                order.append(key)
+            groups[key].append(g)
+        return [groups[k] for k in order]
+
     sets = []
     current_set = []
     current_key = None
@@ -559,7 +578,8 @@ def write_neutral_block(game_summaries, out, indent="  "):
         out()
 
 
-def session_report(folder, my_code, count=None, sets=None, singles_only=False):
+def session_report(folder, my_code, count=None, sets=None, singles_only=False,
+                   pool_matchups=False):
     files, resolved = get_all_slp_files(folder, count)
     if not files:
         print(f"No .slp files found in: {resolved}")
@@ -631,7 +651,7 @@ def session_report(folder, my_code, count=None, sets=None, singles_only=False):
         return "\n".join(lines)
 
     direct_codes = get_direct_codes()
-    sets = group_into_sets(game_summaries)
+    sets = group_into_sets(game_summaries, pool=pool_matchups)
     total_games = len(game_summaries)
     session_stats = aggregate_stats(game_summaries)
     set_wins = sum(
@@ -771,10 +791,14 @@ def main():
     parser.add_argument("--out",   type=str, default=None,  help="Write report to file")
     parser.add_argument("--singles-only", action="store_true",
                         help="Skip doubles (4-player) games")
+    parser.add_argument("--pool-matchups", action="store_true",
+                        help="Pool all games of a matchup into one set, even if "
+                             "played in non-consecutive blocks")
     args = parser.parse_args()
 
     report = session_report(args.folder, args.code, count=args.count, sets=args.sets,
-                            singles_only=args.singles_only)
+                            singles_only=args.singles_only,
+                            pool_matchups=args.pool_matchups)
 
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:
