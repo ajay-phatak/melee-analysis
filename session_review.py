@@ -2,8 +2,8 @@
 """
 Session Review
 ==============
-Aggregates all games from a session, groups them into sets by opponent,
-and shows per-set summaries plus overall session totals.
+Aggregates all games from a session, groups them into sets by matchup
+(opponent + characters), and shows per-set summaries plus overall totals.
 
 Usage:
     python session_review.py "C:/path/to/slippi" --code ABCD#123
@@ -14,6 +14,7 @@ Usage:
 import sys
 import os
 import re
+import pickle
 import argparse
 
 from game_review import (
@@ -277,10 +278,71 @@ def pro_replays_dir(my_char, opp_char):
     return path if os.path.isdir(path) else None
 
 
+# Bump when build_data's per-game structure changes, to invalidate old caches.
+PRO_CACHE_VERSION = 1
+PRO_CACHE_FILENAME = ".pro_cache.pkl"
+
+
+def _pro_dir_signature(slp_files):
+    """Fingerprint of the matchup's replay set: {filename: mtime}.
+    Any add/remove/modify invalidates the cache."""
+    return {os.path.basename(p): round(os.path.getmtime(p), 3) for p in slp_files}
+
+
+def _load_pro_games(pro_dir, my_char, slp_files):
+    """Parse all pro replays for a matchup into game summaries (my_port set,
+    no stage filter), caching the expensive parse to disk per matchup.
+
+    The cache lives inside the matchup dir (gitignored with pro_replays/*) and
+    is keyed by file set + mtimes + my_char + schema version, so adding replays
+    via /fetch-pro-replays auto-invalidates it. Cache I/O is best-effort: any
+    error just falls back to a fresh parse.
+    """
+    cache_path = os.path.join(pro_dir, PRO_CACHE_FILENAME)
+    sig = _pro_dir_signature(slp_files)
+
+    try:
+        with open(cache_path, "rb") as f:
+            cached = pickle.load(f)
+        if (cached.get("version") == PRO_CACHE_VERSION
+                and cached.get("my_char", "").lower() == my_char.lower()
+                and cached.get("signature") == sig):
+            return cached["games"]
+    except Exception:
+        pass  # missing/stale/corrupt cache -> reparse
+
+    games = []
+    for path in slp_files:
+        _, game_data = analyze(path)
+        if game_data is None:
+            continue
+        # Find which port is my_char
+        my_port = None
+        for port_idx, pdata in game_data["ports"].items():
+            if pdata["char"].lower() == my_char.lower():
+                my_port = port_idx
+                break
+        if my_port is None:
+            continue
+        game_data["my_port"] = my_port
+        games.append(game_data)
+
+    try:
+        with open(cache_path, "wb") as f:
+            pickle.dump({"version": PRO_CACHE_VERSION, "my_char": my_char,
+                         "signature": sig, "games": games}, f)
+    except Exception:
+        pass  # best-effort; a read-only dir just means no caching
+
+    return games
+
+
 def load_pro_stats(my_char, opp_char, stages=None):
     """Load and aggregate stats from pro replays for this matchup.
 
-    Detects which port is my_char by character name.
+    Detects which port is my_char by character name. The parsed replays are
+    cached per matchup (see _load_pro_games); the stage filter and aggregation
+    run per call so different sets reuse the same cache.
     If stages is a set of strings, only includes games played on those stages.
     Returns (stats_dict, n_files_total) or (None, 0) if no directory found.
     """
@@ -296,27 +358,8 @@ def load_pro_stats(my_char, opp_char, stages=None):
     if not slp_files:
         return None, 0
 
-    game_summaries = []
-    for path in slp_files:
-        _, game_data = analyze(path)
-        if game_data is None:
-            continue
-
-        # Find which port is my_char
-        my_port = None
-        for port_idx, pdata in game_data["ports"].items():
-            if pdata["char"].lower() == my_char.lower():
-                my_port = port_idx
-                break
-        if my_port is None:
-            continue
-
-        # Stage filter
-        if stages and game_data.get("stage") not in stages:
-            continue
-
-        game_data["my_port"] = my_port
-        game_summaries.append(game_data)
+    all_games = _load_pro_games(pro_dir, my_char, slp_files)
+    game_summaries = [g for g in all_games if not stages or g.get("stage") in stages]
 
     if not game_summaries:
         return None, len(slp_files)
