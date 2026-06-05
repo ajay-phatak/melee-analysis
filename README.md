@@ -35,3 +35,17 @@ python game_review.py pro_replays/<event>/<game>.slp
 python set_review.py pro_replays/<event>/
 python session_review.py pro_replays/<event>/
 ```
+
+## Optional: install the analysis command (Claude Code)
+
+`commands/melee-analysis.md` is a ready-made [Claude Code](https://claude.com/claude-code)
+slash command that runs a full post-session review and walks through the results.
+
+Copy it into your commands folder and fill in your own details:
+
+```bash
+cp commands/melee-analysis.md ~/.claude/commands/melee-analysis.md
+# then edit it: replace ABCD#123 with your connect code and path/to/Slippi with your replay folder
+```
+
+Then run `/melee-analysis` in Claude Code after a session.
