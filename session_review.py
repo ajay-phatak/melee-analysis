@@ -70,24 +70,35 @@ def get_all_slp_files(folder, count=None):
     return files, resolved
 
 
+def _matchup_key(g):
+    """Identity of a matchup: (opponent code, my character, opponent character).
+    A new set begins whenever any of these change, so the same opponent
+    switching characters (or the player switching) splits into separate sets.
+    Uses per-game my_port stored in game_data["my_port"]."""
+    my_port   = g["my_port"]
+    my_char   = g["ports"].get(my_port, {}).get("char", "")
+    opp_ports = [p for p in g["port_order"] if p != my_port]
+    opp_port  = opp_ports[0] if opp_ports else None
+    opp_code  = g["ports"][opp_port].get("netplay_code", "") if opp_port is not None else ""
+    opp_char  = g["ports"][opp_port].get("char", "") if opp_port is not None else ""
+    return (opp_code, my_char, opp_char)
+
+
 def group_into_sets(game_summaries):
-    """Group consecutive games against the same opponent into sets.
+    """Group consecutive games of the same matchup into sets.
+    A set breaks when the opponent OR either player's character changes.
     Uses per-game my_port stored in game_data["my_port"]."""
     sets = []
     current_set = []
-    current_opp = None
+    current_key = None
 
     for g in game_summaries:
-        my_port  = g["my_port"]
-        opp_ports = [p for p in g["port_order"] if p != my_port]
-        opp_port  = opp_ports[0] if opp_ports else None
-        opp_code  = g["ports"][opp_port].get("netplay_code", "") if opp_port is not None else ""
-
-        if opp_code != current_opp:
+        key = _matchup_key(g)
+        if key != current_key:
             if current_set:
                 sets.append(current_set)
             current_set = [g]
-            current_opp = opp_code
+            current_key = key
         else:
             current_set.append(g)
 
@@ -505,7 +516,7 @@ def write_neutral_block(game_summaries, out, indent="  "):
         out()
 
 
-def session_report(folder, my_code, count=None, sets=None):
+def session_report(folder, my_code, count=None, sets=None, singles_only=False):
     files, resolved = get_all_slp_files(folder, count)
     if not files:
         print(f"No .slp files found in: {resolved}")
@@ -515,24 +526,28 @@ def session_report(folder, my_code, count=None, sets=None):
     # then reverse to restore chronological order.
     scan_files = list(reversed(files)) if sets else files
 
-    my_port = None
     game_summaries = []
     skipped = []
+    doubles_skipped = 0
     set_count = 0
-    current_opp = None  # track opponent changes to count sets
+    current_key = None  # track matchup changes (opp + characters) to count sets
 
     for path in scan_files:
         port = detect_port(path, my_code)
         if port is None:
             skipped.append(os.path.basename(path))
             continue
-        if my_port is None:
-            my_port = port
 
         _, game_data = analyze(path, focus_port=port)
         if game_data is None:
             skipped.append(os.path.basename(path))
             continue
+
+        # Skip doubles / non-1v1 games when requested (4-player teams games)
+        if singles_only and len(game_data.get("port_order", [])) > 2:
+            doubles_skipped += 1
+            continue
+
         game_data["file"] = os.path.basename(path)
         game_data["my_port"] = port
 
@@ -546,14 +561,14 @@ def session_report(folder, my_code, count=None, sets=None):
                 if opp_name:
                     game_data["ports"][opp_p]["netplay_code"] = opp_name
 
-        # Count set transitions (newest-first when sets limit is active)
-        opp_ports = [p for p in game_data["port_order"] if p != port]
-        opp_code  = game_data["ports"][opp_ports[0]].get("netplay_code", "") if opp_ports else ""
-        if sets and opp_code != current_opp:
+        # Count set transitions (newest-first when sets limit is active).
+        # A set is one matchup, so split on opponent/character changes too.
+        key = _matchup_key(game_data)
+        if sets and key != current_key:
             if set_count >= sets:
                 break
             set_count += 1
-            current_opp = opp_code
+            current_key = key
 
         game_summaries.append(game_data)
 
@@ -581,11 +596,16 @@ def session_report(folder, my_code, count=None, sets=None):
         if aggregate_stats(s)["wins"] > aggregate_stats(s)["losses"]
     )
 
-    my_char = game_summaries[0]["ports"][my_port]["char"]
+    # Use the first game's OWN player port — the port number can differ between
+    # games in a set, so the global scan port may index the opponent here.
+    g0 = game_summaries[0]
+    my_char = g0["ports"][g0["my_port"]]["char"]
 
     out(f"  Games  : {total_games}  |  Sets: {len(sets)}  |  Character: {my_char}")
     if skipped:
         out(f"  Skipped: {len(skipped)} games (no matching connect code)")
+    if doubles_skipped:
+        out(f"  Skipped: {doubles_skipped} doubles games (singles-only)")
     out()
 
     # Set index
@@ -706,9 +726,12 @@ def main():
     parser.add_argument("--sets",  type=int, default=None,  help="Number of most recent sets to include")
     parser.add_argument("--count", type=int, default=None,  help="Max number of recent games to include")
     parser.add_argument("--out",   type=str, default=None,  help="Write report to file")
+    parser.add_argument("--singles-only", action="store_true",
+                        help="Skip doubles (4-player) games")
     args = parser.parse_args()
 
-    report = session_report(args.folder, args.code, count=args.count, sets=args.sets)
+    report = session_report(args.folder, args.code, count=args.count, sets=args.sets,
+                            singles_only=args.singles_only)
 
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:
