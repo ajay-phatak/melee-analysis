@@ -8,8 +8,13 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Personal scratch notes
+# Personal scratch notes + analysis outputs (contain connect codes / opponent data)
 session*.txt
+session.json
+trends.txt
+backfill.*
+# Long-term coach history (source of truth; personal — keep it local / in your vault)
+*history*.json
 
 # Python virtual env
 .venv/

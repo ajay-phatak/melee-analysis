@@ -9,7 +9,8 @@ Tooling for analyzing Super Smash Bros. Melee gameplay — fetches pro replay se
 - `fetch_pro_replays.py` — pulls pro replay sets from a HuggingFace dataset.
 - `game_review.py` — single-game analysis from a Slippi `.slp` file.
 - `set_review.py` — set-level (best-of-N) analysis, aggregating game reviews.
-- `session_review.py` — multi-set / session-level review.
+- `session_review.py` — multi-set / session-level review (sets split by matchup; pro-baseline comparison; `--json` emits structured per-set records).
+- `coach.py` — long-term coach: persists each session's per-set records to a history file (`ingest`) and computes cross-session trends + per-matchup records (`trends`).
 
 ## Setup
 
@@ -36,16 +37,38 @@ python set_review.py pro_replays/<event>/
 python session_review.py pro_replays/<event>/
 ```
 
+## Long-term coaching
+
+Track progress across sessions, not just one-offs:
+
+```bash
+# 1. Analyze a session and emit structured per-set records
+python session_review.py "path/to/Slippi" --code ABCD#123 --json session.json --out session.txt
+
+# 2. Fold those records into a long-term history (idempotent — dedups by set)
+python coach.py ingest session.json --history path/to/history.json
+
+# 3. Compute cross-session trends + per-matchup records
+python coach.py trends --history path/to/history.json
+```
+
+`history.json` is the source of truth (personal data — keep it out of shared repos). The
+`/melee-analysis` command (below) wires these together and can also write per-session, per-matchup,
+and dashboard notes to Obsidian.
+
 ## Optional: install the analysis command (Claude Code)
 
 `commands/melee-analysis.md` is a ready-made [Claude Code](https://claude.com/claude-code)
-slash command that runs a full post-session review and walks through the results.
+slash command that acts as a **long-term coach**: it runs the session review, folds the results into
+your long-term history via `coach.py`, optionally writes per-session / per-matchup / dashboard notes
+to Obsidian, and then discusses both this session and how you're trending.
 
 Copy it into your commands folder and fill in your own details:
 
 ```bash
 cp commands/melee-analysis.md ~/.claude/commands/melee-analysis.md
-# then edit it: replace ABCD#123 with your connect code and path/to/Slippi with your replay folder
+# then edit it: connect code (ABCD#123), Slippi folder, and your history.json path
 ```
 
-Then run `/melee-analysis` in Claude Code after a session.
+Then run `/melee-analysis` in Claude Code after a session. The Obsidian step uses the
+`obsidian-mcp-connector` MCP server and is optional — the history + trends work without it.

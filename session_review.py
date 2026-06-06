@@ -14,7 +14,9 @@ Usage:
 import sys
 import os
 import re
+import json
 import pickle
+import datetime
 import argparse
 
 from game_review import (
@@ -284,6 +286,87 @@ def aggregate_stats_opponent(game_summaries):
         g_copy["my_port"] = opp_port
         opponent_games.append(g_copy)
     return aggregate_stats(opponent_games) if opponent_games else None
+
+
+_SLP_DATE_RE = re.compile(r"(\d{8})T(\d{6})")
+
+
+def _date_from_file(fname):
+    """Parse YYYY-MM-DD from a Slippi filename like Game_20260605T223206.slp."""
+    m = _SLP_DATE_RE.search(fname or "")
+    if not m:
+        return ""
+    d = m.group(1)
+    return f"{d[0:4]}-{d[4:6]}-{d[6:8]}"
+
+
+def _r(x, nd=1):
+    """Round, passing through None."""
+    return round(x, nd) if x is not None else None
+
+
+def _set_record(set_games):
+    """Flatten one matchup-set into a JSON-friendly record for the long-term coach.
+    Reuses aggregate_stats (you) and aggregate_stats_opponent (neutral lost)."""
+    g0 = set_games[0]
+    mp = g0["my_port"]
+    opp_ports = [p for p in g0["port_order"] if p != mp]
+    opp_port = opp_ports[0] if opp_ports else None
+    opp_data = g0["ports"].get(opp_port, {}) if opp_port is not None else {}
+
+    st = aggregate_stats(set_games)
+    opp_st = aggregate_stats_opponent(set_games)
+    lt = st["ledge_tech"]
+    files = sorted(g.get("file", "") for g in set_games)
+
+    n_opened = len(st["dealt_seqs"])
+    n_lost = len(opp_st["dealt_seqs"]) if opp_st else 0
+
+    def pct(a, b):
+        return round(100.0 * a / b, 1) if b else None
+
+    return {
+        "session_date": _date_from_file(files[0] if files else ""),
+        "opp_code": opp_data.get("netplay_code", "Unknown"),
+        "my_char": g0["ports"][mp]["char"],
+        "opp_char": opp_data.get("char", "?"),
+        "stages": [g["stage"] for g in set_games],
+        "n_games": st["games"],
+        "wins": st["wins"],
+        "losses": st["losses"],
+        "files": files,
+        "metrics": {
+            "avg_stocks_lost": _r(st["avg_stocks_lost"], 2),
+            "shield_s": _r(st["avg_shield_s"]),
+            "crouch_s": _r(st["avg_crouch_s"]),
+            "center_pct": _r(st["avg_center_pct"]),
+            "lcancel_pct": _r(st["lc_rate"]),
+            "wavedash_pct": _r(st["wd_rate"]),
+            "f1_pct": _r(st["f1_rate"]),
+            "punish_pct": _r(st["avg_punish"]),
+            "kills": st["kills"],
+            "kill_rate_pct": pct(st["kills"], n_opened),
+            "edgeguard_above_pct": pct(st["eg_above_conv"], st["eg_above_att"]),
+            "edgeguard_below_pct": pct(st["eg_below_conv"], st["eg_below_att"]),
+            "neutral_opened": n_opened,
+            "neutral_lost": n_lost,
+            "neutral_win_pct": pct(n_opened, n_opened + n_lost),
+            "ledgedash_count": lt["ledgedash_count"],
+            "galint_avg": _r(lt["galint_sum"] / lt["galint_n"]) if lt["galint_n"] else None,
+            "galint_best": lt["galint_max"],
+            "galint_keep_pct": pct(lt["galint_pos"], lt["galint_n"]),
+            "ledgedash_fall_avg": _r(lt["ld_fall_sum"] / lt["ld_fall_n"]) if lt["ld_fall_n"] else None,
+            "ledge_hang_invuln_pct": pct(lt["hang_invuln_frames"], lt["hang_frames"]),
+        },
+    }
+
+
+def build_json_payload(sets):
+    """Structured per-set records for the whole session (consumed by coach.py)."""
+    return {
+        "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        "sets": [_set_record(s) for s in sets],
+    }
 
 
 def _normalize_char(name):
@@ -579,7 +662,7 @@ def write_neutral_block(game_summaries, out, indent="  "):
 
 
 def session_report(folder, my_code, count=None, sets=None, singles_only=False,
-                   pool_matchups=False):
+                   pool_matchups=False, json_path=None):
     files, resolved = get_all_slp_files(folder, count)
     if not files:
         print(f"No .slp files found in: {resolved}")
@@ -653,6 +736,15 @@ def session_report(folder, my_code, count=None, sets=None, singles_only=False,
     direct_codes = get_direct_codes()
     sets = group_into_sets(game_summaries, pool=pool_matchups)
     total_games = len(game_summaries)
+
+    # Structured output for the long-term coach (coach.py). Always use
+    # NON-pooled consecutive sets here, independent of the display --pool-matchups
+    # setting, so each record is one sitting with a well-defined session_date
+    # (a pooled set could otherwise span multiple days).
+    if json_path:
+        json_sets = group_into_sets(game_summaries, pool=False)
+        with open(json_path, "w", encoding="utf-8") as jf:
+            json.dump(build_json_payload(json_sets), jf, indent=2)
     session_stats = aggregate_stats(game_summaries)
     set_wins = sum(
         1 for s in sets
@@ -794,11 +886,15 @@ def main():
     parser.add_argument("--pool-matchups", action="store_true",
                         help="Pool all games of a matchup into one set, even if "
                              "played in non-consecutive blocks")
+    parser.add_argument("--json", type=str, default=None, dest="json_path",
+                        help="Write structured per-set records to this JSON path "
+                             "(for the long-term coach, coach.py)")
     args = parser.parse_args()
 
     report = session_report(args.folder, args.code, count=args.count, sets=args.sets,
                             singles_only=args.singles_only,
-                            pool_matchups=args.pool_matchups)
+                            pool_matchups=args.pool_matchups,
+                            json_path=args.json_path)
 
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:
