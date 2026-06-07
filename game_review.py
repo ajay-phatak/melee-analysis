@@ -36,6 +36,13 @@ FPS = 60
 
 DAMAGE_STATES = set(range(75, 100)) | {38}
 
+
+def _sv(state):
+    """Action-state as a raw int. py-slippi returns a plain int for action
+    states it has no enum member for (e.g. some chars), and those lack
+    ``.value`` — so normalize before comparing against int-based state sets."""
+    return state.value if hasattr(state, "value") else state
+
 AERIAL_LANDING_STATES = {
     ActionState.LANDING_AIR_N, ActionState.LANDING_AIR_F,
     ActionState.LANDING_AIR_B, ActionState.LANDING_AIR_HI, ActionState.LANDING_AIR_LW,
@@ -848,7 +855,7 @@ class EdgeguardTracker:
             not pf.airborne
             and abs(pf.x) <= self.ledge_x + 5
             and pf.state not in CLIFF_STATES
-            and pf.state.value not in DAMAGE_STATES
+            and _sv(pf.state) not in DAMAGE_STATES
             and pf.stocks > 0
         )
 
@@ -1069,7 +1076,7 @@ class PunishTracker:
 
     def feed(self, frame_idx, victim, victim_hist=None, attacker_hist=None):
         state  = victim.state
-        in_dmg = state.value in DAMAGE_STATES
+        in_dmg = _sv(state) in DAMAGE_STATES
 
         if in_dmg:
             if frame_idx - self._last_dmg_frame > 60:
@@ -1082,7 +1089,7 @@ class PunishTracker:
                     opener = "grab"
                 elif prev in DOWN_STATES:
                     opener = "knockdown"
-                elif state in DAMAGE_FLY_STATES and (prev is None or prev.value not in DAMAGE_STATES):
+                elif state in DAMAGE_FLY_STATES and (prev is None or _sv(prev) not in DAMAGE_STATES):
                     opener = "launch"
                 else:
                     opener = None
