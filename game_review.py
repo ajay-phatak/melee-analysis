@@ -1110,6 +1110,7 @@ class PunishTracker:
         self._hits           = 0
         self._peak_pct       = 0.0
         self._last_dmg_frame = -999
+        self._last_disadv_frame = -999  # last frame victim was hit/grabbed/thrown/down
         self._last_in_dmg    = False
         self._opener         = None   # "grab", "knockdown", "launch", or None
         self._opener_move    = None   # specific move that opened (e.g. "down_special")
@@ -1123,10 +1124,19 @@ class PunishTracker:
              attacker_attack=None):
         state  = victim.state
         in_dmg = _sv(state) in DAMAGE_STATES
+        # "Disadvantage" = victim is being hit, launched, grabbed, thrown, or
+        # knocked down. Counting grab/throw/down frames keeps a punish alive
+        # across a regrab, so a chaingrab or tech-chase (the victim never returns
+        # to neutral) stays ONE string instead of splitting into separate openings.
+        in_disadv = (in_dmg or state in DAMAGE_FLY_STATES or state in CAPTURE_STATES
+                     or state in THROWN_STATES or state in DOWN_STATES)
         move   = attack_name(attacker_attack)
 
         if in_dmg:
-            if frame_idx - self._last_dmg_frame > 60:
+            # New opening only when there's no live punish, or the victim had
+            # returned to neutral (out of disadvantage) for a real gap. A regrab
+            # keeps _last_disadv_frame fresh, so it extends the same string.
+            if not self._active or frame_idx - self._last_disadv_frame > 60:
                 if self._active:
                     self._close(frame_idx, victim, killed=False)
 
@@ -1163,9 +1173,14 @@ class PunishTracker:
             self._last_dmg_frame = frame_idx
             self._peak_pct = max(self._peak_pct, victim.damage)
         else:
-            if self._active and frame_idx - self._last_dmg_frame > 90:
+            # Close only after the victim has been fully out of disadvantage
+            # (not even grabbed) for the grace window — so a slow regrab doesn't
+            # prematurely end a chaingrab.
+            if self._active and frame_idx - self._last_disadv_frame > 90:
                 self._close(frame_idx, victim, killed=False)
 
+        if in_disadv:
+            self._last_disadv_frame = frame_idx
         self._last_in_dmg = in_dmg
         self._prev_state  = state
 
