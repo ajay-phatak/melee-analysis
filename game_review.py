@@ -133,11 +133,33 @@ THROWN_STATES = {
     ActionState.THROWN_LW, ActionState.THROWN_LW_WOMEN,
     ActionState.THROWN_F_F, ActionState.THROWN_F_B, ActionState.THROWN_F_HI, ActionState.THROWN_F_LW,
 }
-# Victim is knocked down (tech situation)
+# The victim's THROWN state names the throw directly (more reliable than the
+# attacker's last_attack_landed timing), so a grab opener reads as f/b/u/dthrow.
+THROWN_NAME_MAP = {
+    ActionState.THROWN_F: "fthrow", ActionState.THROWN_F_F: "fthrow",
+    ActionState.THROWN_B: "bthrow", ActionState.THROWN_F_B: "bthrow",
+    ActionState.THROWN_HI: "uthrow", ActionState.THROWN_F_HI: "uthrow",
+    ActionState.THROWN_LW: "dthrow", ActionState.THROWN_LW_WOMEN: "dthrow",
+    ActionState.THROWN_F_LW: "dthrow",
+}
+# Victim is knocked down (lying on the ground after a throw/knockdown)
 DOWN_STATES = {
     ActionState.DOWN_BOUND_U, ActionState.DOWN_WAIT_U,
     ActionState.DOWN_BOUND_D, ActionState.DOWN_WAIT_D,
     ActionState.SHIELD_BREAK_DOWN_U, ActionState.SHIELD_BREAK_DOWN_D,
+}
+# Knockdown + tech-chase family: victim is on the ground OR teching / getting up
+# (tech roll, getup roll, stand, getup-attack). During these the victim is still
+# in a tech-chase situation (chaseable), not back to neutral — so a punish string
+# stays alive across the knockdown until a regrab/hit follows or they truly escape.
+KNOCKDOWN_TECH_STATES = DOWN_STATES | {
+    s for s in (getattr(ActionState, n, None) for n in (
+        "DOWN_DAMAGE_U", "DOWN_DAMAGE_D", "DOWN_STAND_U", "DOWN_STAND_D",
+        "DOWN_FOWARD_U", "DOWN_FOWARD_D", "DOWN_BACK_U", "DOWN_BACK_D",
+        "DOWN_SPOT_U", "DOWN_SPOT_D", "DOWN_ATTACK_U", "DOWN_ATTACK_D",
+        "PASS", "PASSIVE", "PASSIVE_STAND_F", "PASSIVE_STAND_B",
+        "PASSIVE_WALL", "PASSIVE_WALL_JUMP", "PASSIVE_CEIL",
+    )) if s is not None
 }
 # Victim was in some form of hitstun / grab / knockdown (i.e. the opponent did
 # something to them). Used to tell a real opponent kill from a self-destruct.
@@ -1111,7 +1133,7 @@ class PunishTracker:
         self._peak_pct       = 0.0
         self._last_dmg_frame = -999
         self._last_disadv_frame = -999  # last frame victim was hit/grabbed/thrown/down
-        self._last_in_dmg    = False
+        self._last_in_hit    = False
         self._opener         = None   # "grab", "knockdown", "launch", or None
         self._opener_move    = None   # specific move that opened (e.g. "down_special")
         self._ender_move     = None   # last move landed before the sequence closed
@@ -1124,27 +1146,32 @@ class PunishTracker:
              attacker_attack=None):
         state  = victim.state
         in_dmg = _sv(state) in DAMAGE_STATES
-        # "Disadvantage" = victim is being hit, launched, grabbed, thrown, or
-        # knocked down. Counting grab/throw/down frames keeps a punish alive
-        # across a regrab, so a chaingrab or tech-chase (the victim never returns
-        # to neutral) stays ONE string instead of splitting into separate openings.
-        in_disadv = (in_dmg or state in DAMAGE_FLY_STATES or state in CAPTURE_STATES
-                     or state in THROWN_STATES or state in DOWN_STATES)
-        move   = attack_name(attacker_attack)
+        # A "hit" includes throws: at tech-chase percents a dthrow puts the victim
+        # into THROWN -> DOWN states without ever entering a DAMAGE state, so
+        # keying only on damage states missed most throws and whole tech-chases.
+        in_hit = in_dmg or state in THROWN_STATES
+        # "Disadvantage" = victim is being hit/thrown/grabbed/knocked-down/teching.
+        # Keeping all of these alive lets a chaingrab or tech-chase (the victim
+        # never returns to neutral) stay ONE string instead of splitting.
+        in_disadv = (in_hit or state in DAMAGE_FLY_STATES or state in CAPTURE_STATES
+                     or state in KNOCKDOWN_TECH_STATES)
+        # Name a throw from the victim's THROWN state; otherwise from the
+        # attacker's last landed attack.
+        move = THROWN_NAME_MAP.get(state) if state in THROWN_STATES else attack_name(attacker_attack)
 
-        if in_dmg:
+        if in_hit:
             # New opening only when there's no live punish, or the victim had
             # returned to neutral (out of disadvantage) for a real gap. A regrab
-            # keeps _last_disadv_frame fresh, so it extends the same string.
+            # or tech-chase regrab keeps _last_disadv_frame fresh, extending it.
             if not self._active or frame_idx - self._last_disadv_frame > 60:
                 if self._active:
                     self._close(frame_idx, victim, killed=False)
 
-                # Classify opener from victim's pre-damage state
+                # Classify opener from victim's pre-hit state
                 prev = self._prev_state
                 if prev in CAPTURE_STATES or prev in THROWN_STATES:
                     opener = "grab"
-                elif prev in DOWN_STATES:
+                elif prev in KNOCKDOWN_TECH_STATES:
                     opener = "knockdown"
                 elif state in DAMAGE_FLY_STATES and (prev is None or _sv(prev) not in DAMAGE_STATES):
                     opener = "launch"
@@ -1166,7 +1193,7 @@ class PunishTracker:
                 self._start_frame     = frame_idx
                 self._hits            = 1
                 self._peak_pct        = victim.damage
-            elif not self._last_in_dmg:
+            elif not self._last_in_hit:
                 self._hits += 1
             if move is not None:
                 self._ender_move = move
@@ -1174,14 +1201,14 @@ class PunishTracker:
             self._peak_pct = max(self._peak_pct, victim.damage)
         else:
             # Close only after the victim has been fully out of disadvantage
-            # (not even grabbed) for the grace window — so a slow regrab doesn't
-            # prematurely end a chaingrab.
+            # (not grabbed, not teching) for the grace window — so a slow regrab
+            # or tech-chase regrab doesn't prematurely end the string.
             if self._active and frame_idx - self._last_disadv_frame > 90:
                 self._close(frame_idx, victim, killed=False)
 
         if in_disadv:
             self._last_disadv_frame = frame_idx
-        self._last_in_dmg = in_dmg
+        self._last_in_hit = in_hit
         self._prev_state  = state
 
     def notify_death(self, frame_idx):

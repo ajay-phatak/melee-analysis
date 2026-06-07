@@ -476,7 +476,8 @@ def pro_replays_dir(my_char, opp_char):
 
 # Bump when build_data's per-game structure changes, to invalidate old caches.
 # v2: added sd_count, death_buckets, recovery, opener_move/ender_move on punishes.
-PRO_CACHE_VERSION = 2
+# v3: punish tracker now captures throws + tech-chases (dthrow strings).
+PRO_CACHE_VERSION = 3
 PRO_CACHE_FILENAME = ".pro_cache.pkl"
 
 
