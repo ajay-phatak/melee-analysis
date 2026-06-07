@@ -46,4 +46,5 @@ python coach.py trends --history "path/to/history.json" --out trends.txt
 - `history.json` is the source of truth (personal — keep it out of any shared repo). Obsidian notes are generated views, regenerable from history.
 - Sets split by matchup `(opponent, my char, opp char)`.
 - **SDs** (self-destructs, edgehog-aware) replace "stocks lost" as the tracked durability metric. Matchup notes use **gameplan** data: opener/ender moves (`down_special` = shine, `dthrow`, `uair`, …), death/kill geography, recovery, and damage-per-opening — all in `session.txt` (per set) and `trends.txt` (per-matchup running aggregate).
+- **Re-processing a past session** (after a pipeline change): `session_review.py … --files <those .slp>` (overrides `--count`) to scope it, then `coach.py ingest … --replace` to upsert the existing records with new fields.
 - If a set shows `[no pro replays for X vs Y]`, `fetch_pro_replays.py` will add that matchup's baseline.

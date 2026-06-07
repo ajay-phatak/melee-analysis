@@ -822,8 +822,13 @@ def write_neutral_block(game_summaries, out, indent="  "):
 
 
 def session_report(folder, my_code, count=None, sets=None, singles_only=False,
-                   pool_matchups=False, json_path=None):
-    files, resolved = get_all_slp_files(folder, count)
+                   pool_matchups=False, json_path=None, files_override=None):
+    if files_override:
+        files = sorted((f for f in files_override if f.lower().endswith(".slp")),
+                       key=os.path.getmtime)
+        resolved = os.path.dirname(files[0]) if files else folder
+    else:
+        files, resolved = get_all_slp_files(folder, count)
     if not files:
         print(f"No .slp files found in: {resolved}")
         sys.exit(1)
@@ -1049,12 +1054,16 @@ def main():
     parser.add_argument("--json", type=str, default=None, dest="json_path",
                         help="Write structured per-set records to this JSON path "
                              "(for the long-term coach, coach.py)")
+    parser.add_argument("--files", nargs="+", default=None,
+                        help="Explicit .slp files to analyze (overrides folder scan "
+                             "and --count); useful for re-running a specific session")
     args = parser.parse_args()
 
     report = session_report(args.folder, args.code, count=args.count, sets=args.sets,
                             singles_only=args.singles_only,
                             pool_matchups=args.pool_matchups,
-                            json_path=args.json_path)
+                            json_path=args.json_path,
+                            files_override=args.files)
 
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:

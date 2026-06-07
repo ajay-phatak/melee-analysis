@@ -79,30 +79,41 @@ def save_history(path, hist):
         json.dump(hist, f, indent=2)
 
 
-def ingest(session_json, history_path):
+def ingest(session_json, history_path, replace=False):
+    """Fold a session's per-set records into history, deduped by set_key.
+
+    Default is idempotent append (existing sets skipped). With replace=True,
+    existing sets are upserted — the new record overwrites the old one. Use
+    replace when re-processing a past session through an updated pipeline (e.g.
+    to backfill new fields like gameplan / SDs onto already-ingested sets)."""
     with open(session_json, encoding="utf-8") as f:
         payload = json.load(f)
 
     hist = load_history(history_path)
-    existing = {r.get("set_key") for r in hist["records"]}
+    by_key = {r.get("set_key"): r for r in hist["records"]}
 
-    added = 0
+    added = replaced = 0
     for s in payload.get("sets", []):
         key = set_key(s.get("files", []))
-        if key in existing:
+        if key in by_key and not replace:
             continue
         rec = dict(s)
         rec["set_key"] = key
         rec["ingested_at"] = datetime.datetime.now().isoformat(timespec="seconds")
-        hist["records"].append(rec)
-        existing.add(key)
-        added += 1
+        if key in by_key:
+            by_key[key].clear()
+            by_key[key].update(rec)
+            replaced += 1
+        else:
+            hist["records"].append(rec)
+            by_key[key] = rec
+            added += 1
 
     hist["records"].sort(key=_record_sort_key)
     save_history(history_path, hist)
-    print(f"Ingested {added} new set(s); history now has "
+    print(f"Ingested {added} new + {replaced} replaced set(s); history now has "
           f"{len(hist['records'])} record(s) at {history_path}")
-    return added
+    return added + replaced
 
 
 def _record_sort_key(r):
@@ -431,6 +442,9 @@ def main():
     p_ing = sub.add_parser("ingest", help="Fold a session's --json output into history (idempotent).")
     p_ing.add_argument("session_json", help="Path to session_review.py --json output")
     p_ing.add_argument("--history", required=True, help="Path to the history JSON store")
+    p_ing.add_argument("--replace", action="store_true",
+                       help="Upsert: overwrite existing sets with the same files "
+                            "(use when re-processing a past session through an updated pipeline)")
 
     p_tr = sub.add_parser("trends", help="Compute long-term trends from history.")
     p_tr.add_argument("--history", required=True, help="Path to the history JSON store")
@@ -441,7 +455,7 @@ def main():
     args = parser.parse_args()
 
     if args.cmd == "ingest":
-        ingest(args.session_json, args.history)
+        ingest(args.session_json, args.history, replace=args.replace)
     elif args.cmd == "trends":
         hist = load_history(args.history)
         tr = compute_trends(hist)
