@@ -45,7 +45,7 @@ METRICS = {
     "edgeguard_below_pct": ("Edgeguard below %",    True,  3.0, "{:.0f}%"),
     "wavedash_pct":        ("Wavedash %",           True,  2.0, "{:.0f}%"),
     "f1_pct":              ("Frame-1 aerial %",     True,  2.0, "{:.0f}%"),
-    "avg_stocks_lost":     ("Avg stocks lost",     False, 0.2, "{:.1f}"),
+    "sd_per_game":         ("SDs / game",          False, 0.15, "{:.1f}"),
 }
 RECENT_SESSIONS = 3  # how many most-recent sessions count as "recent"
 
@@ -183,6 +183,58 @@ def _metric_trends(points):
     return out
 
 
+def _merge_counts(dst, src):
+    for k, v in (src or {}).items():
+        dst[k] = dst.get(k, 0) + v
+
+
+def _merge_nested(dst, src):
+    for move, oc in (src or {}).items():
+        slot = dst.setdefault(move, {})
+        for o, c in oc.items():
+            slot[o] = slot.get(o, 0) + c
+
+
+def _merge_gameplan(recs):
+    """Sum the per-set gameplan distributions across a matchup's records into a
+    running picture. Records predating the gameplan feature (no 'gameplan' key)
+    are skipped gracefully."""
+    g = {k: {} for k in ("opened_by", "opening_sources", "string_outcomes",
+                         "your_kill_moves", "their_kill_moves",
+                         "death_geo", "kill_geo")}
+    recov_att = recov_deaths = nf = na = 0
+    dfn = dfd = dan = dad = cwn = cwd = cln = cld = 0.0
+    for r in recs:
+        gp = r.get("gameplan") or {}
+        _merge_counts(g["opened_by"], gp.get("opened_by"))
+        _merge_counts(g["opening_sources"], gp.get("opening_sources"))
+        _merge_nested(g["string_outcomes"], gp.get("string_outcomes"))
+        _merge_counts(g["your_kill_moves"], gp.get("your_kill_moves"))
+        _merge_counts(g["their_kill_moves"], gp.get("their_kill_moves"))
+        _merge_counts(g["death_geo"], gp.get("death_geo"))
+        _merge_counts(g["kill_geo"], gp.get("kill_geo"))
+        recov_att    += gp.get("recovery_att", 0)
+        recov_deaths += gp.get("recovery_deaths", 0)
+        f, ag = gp.get("neutral_for", 0), gp.get("neutral_against", 0)
+        nf += f; na += ag
+        if gp.get("dmg_per_opening_for") is not None:
+            w = max(f, 1); dfn += gp["dmg_per_opening_for"] * w; dfd += w
+        if gp.get("dmg_per_opening_against") is not None:
+            w = max(ag, 1); dan += gp["dmg_per_opening_against"] * w; dad += w
+        ng = r.get("n_games", 0)
+        if gp.get("center_win") is not None:
+            cwn += gp["center_win"] * ng; cwd += ng
+        if gp.get("center_loss") is not None:
+            cln += gp["center_loss"] * ng; cld += ng
+    g["recovery_att"], g["recovery_deaths"] = recov_att, recov_deaths
+    g["neutral_for"], g["neutral_against"] = nf, na
+    g["dmg_per_opening_for"]     = round(dfn / dfd, 1) if dfd else None
+    g["dmg_per_opening_against"] = round(dan / dad, 1) if dad else None
+    g["center_win"]  = round(cwn / cwd, 1) if cwd else None
+    g["center_loss"] = round(cln / cld, 1) if cld else None
+    return g
+
+
 def compute_trends(hist):
     records = sorted(hist.get("records", []), key=_record_sort_key)
     points = _session_points(records)
@@ -225,6 +277,7 @@ def compute_trends(hist):
         matchup_summary[key] = {
             "wins": mk["wins"], "losses": mk["losses"], "games": mk["games"],
             "sessions": len(mk["sessions"]), "headline": headline,
+            "gameplan": _merge_gameplan(mk["recs"]),
         }
 
     return {
@@ -287,7 +340,85 @@ def render_trends(tr):
           f"Neut {s('neutral_win_pct','{:.0f}%')}  "
           f"Kill {s('kill_rate_pct','{:.0f}%')}")
     a("")
+
+    # Per-matchup gameplan (running neutral/punish-flow picture).
+    a("-" * 70)
+    a("  MATCHUP GAMEPLANS")
+    a("-" * 70)
+    for key, mk in sorted(tr["matchups"].items(),
+                          key=lambda kv: kv[1]["games"], reverse=True):
+        gp = mk.get("gameplan") or {}
+        if not (gp.get("opened_by") or gp.get("opening_sources")):
+            continue  # no gameplan data yet (records predate the feature)
+        a(f"  {key}  ({mk['games']}g)")
+        if gp.get("opened_by"):
+            a(f"    Opened by   : {_fmt_opened_by(gp['opened_by'])}")
+        if gp.get("opening_sources"):
+            a(f"    You open    : {_fmt_dist(gp['opening_sources'])}")
+        if gp.get("string_outcomes"):
+            a(f"    Strings end : {_fmt_string_outcomes(gp['string_outcomes'])}")
+        ykm, tkm = gp.get("your_kill_moves") or {}, gp.get("their_kill_moves") or {}
+        if ykm or tkm:
+            a(f"    Kill moves  : you {_fmt_dist(ykm) if ykm else '—'}  |  "
+              f"them {_fmt_dist(tkm) if tkm else '—'}")
+        df, da = gp.get("dmg_per_opening_for"), gp.get("dmg_per_opening_against")
+        if df is not None and da is not None:
+            a(f"    Dmg/opening : you {df:.1f}% / them {da:.1f}%")
+        if gp.get("death_geo"):
+            a(f"    You die     : {_fmt_dist(gp['death_geo'])}")
+        if gp.get("kill_geo"):
+            a(f"    You kill    : {_fmt_dist(gp['kill_geo'])}")
+        ra, rd = gp.get("recovery_att", 0), gp.get("recovery_deaths", 0)
+        cw, cl = gp.get("center_win"), gp.get("center_loss")
+        tail = []
+        if ra:
+            tail.append(f"recovery {round(100*(ra-rd)/ra)}% back")
+        if cw is not None and cl is not None:
+            tail.append(f"center {cw:.0f}%W/{cl:.0f}%L")
+        if tail:
+            a(f"    Position    : {' · '.join(tail)}")
+        a("")
     return "\n".join(out)
+
+
+# --- gameplan formatting helpers ---------------------------------------------
+def _fmt_dist(d, top=4):
+    tot = sum(d.values())
+    if not tot:
+        return "—"
+    items = sorted(d.items(), key=lambda kv: kv[1], reverse=True)[:top]
+    return " · ".join(f"{k} {round(100*v/tot)}%" for k, v in items)
+
+
+_MISTAKE_SHORT = {
+    "caught_neutral": "caught", "grabbed_neutral": "grabbed",
+    "landing_lag": "landing-lag", "whiffed": "whiffed",
+    "attacked_into_shield": "OOS", "attacked_cc_grabbed": "CC'd",
+    "missed_tech": "tech-chase", "reversal_victim": "reversed",
+    "airdodged": "airdodge", "unknown": "?",
+}
+
+
+def _fmt_opened_by(d, top=4):
+    tot = sum(d.values())
+    if not tot:
+        return "—"
+    items = sorted(d.items(), key=lambda kv: kv[1], reverse=True)[:top]
+    parts = []
+    for k, v in items:
+        move, _, mistake = k.partition("|")
+        parts.append(f"{move}→{_MISTAKE_SHORT.get(mistake, mistake)} {round(100*v/tot)}%")
+    return " · ".join(parts)
+
+
+def _fmt_string_outcomes(so, top=6):
+    flat = []
+    for move, oc in so.items():
+        for outcome, c in oc.items():
+            if c:
+                flat.append((f"{move}→{outcome}", c))
+    flat.sort(key=lambda kv: kv[1], reverse=True)
+    return " · ".join(f"{k} {c}" for k, c in flat[:top]) or "—"
 
 
 # ---------------------------------------------------------------------------

@@ -27,6 +27,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="repla
 
 from slippi import Game
 from slippi.id import ActionState, Stage
+from slippi.event import Attack
 
 FPS = 60
 
@@ -66,6 +67,39 @@ ATTACK_AIR_NAME_MAP = {
     ActionState.ATTACK_AIR_LW: "dair",
 }
 AERIALS = ("nair", "fair", "bair", "uair", "dair")
+
+# Map the global `Attack` enum (post.last_attack_landed) to short move labels.
+# Character-agnostic, so DOWN_SPECIAL == shine for both spacies, etc.
+ATTACK_NAME_MAP = {
+    Attack.JAB_1: "jab", Attack.JAB_2: "jab", Attack.JAB_3: "jab",
+    Attack.RAPID_JABS: "jab",
+    Attack.DASH_ATTACK: "dash_attack",
+    Attack.SIDE_TILT: "ftilt", Attack.UP_TILT: "utilt", Attack.DOWN_TILT: "dtilt",
+    Attack.SIDE_SMASH: "fsmash", Attack.UP_SMASH: "usmash", Attack.DOWN_SMASH: "dsmash",
+    Attack.NAIR: "nair", Attack.FAIR: "fair", Attack.BAIR: "bair",
+    Attack.UAIR: "uair", Attack.DAIR: "dair",
+    Attack.NEUTRAL_SPECIAL: "b_special", Attack.SIDE_SPECIAL: "side_special",
+    Attack.UP_SPECIAL: "up_special", Attack.DOWN_SPECIAL: "down_special",
+    Attack.FORWARD_THROW: "fthrow", Attack.BACK_THROW: "bthrow",
+    Attack.UP_THROW: "uthrow", Attack.DOWN_THROW: "dthrow",
+    Attack.PUMMEL: "pummel",
+    Attack.GET_UP_ATTACK_FROM_BACK: "getup_attack",
+    Attack.GET_UP_ATTACK_FROM_FRONT: "getup_attack",
+    Attack.LEDGE_GET_UP_ATTACK_100: "ledge_attack",
+    Attack.LEDGE_GET_UP_ATTACK: "ledge_attack",
+}
+
+
+def attack_name(att):
+    """Short label for a post.last_attack_landed value (Attack enum or raw int)."""
+    if att is None:
+        return None
+    try:
+        return ATTACK_NAME_MAP.get(Attack(att), "other")
+    except (ValueError, KeyError):
+        return "other"
+
+
 SHIELD_STATES = {
     ActionState.GUARD_ON, ActionState.GUARD, ActionState.GUARD_OFF,
     ActionState.GUARD_SET_OFF, ActionState.GUARD_REFLECT,
@@ -105,6 +139,10 @@ DOWN_STATES = {
     ActionState.DOWN_BOUND_D, ActionState.DOWN_WAIT_D,
     ActionState.SHIELD_BREAK_DOWN_U, ActionState.SHIELD_BREAK_DOWN_D,
 }
+# Victim was in some form of hitstun / grab / knockdown (i.e. the opponent did
+# something to them). Used to tell a real opponent kill from a self-destruct.
+GOT_HIT_STATES = (set(DAMAGE_STATES) | DAMAGE_FLY_STATES
+                  | CAPTURE_STATES | THROWN_STATES | DOWN_STATES)
 # All grounded and aerial attack states
 ATTACK_STATES = frozenset({
     ActionState.ATTACK_11, ActionState.ATTACK_12, ActionState.ATTACK_13,
@@ -360,7 +398,8 @@ def detect_port(slp_path, my_code):
 
 class PF:
     """Lightweight per-frame player snapshot."""
-    __slots__ = ["state", "x", "y", "airborne", "stocks", "damage", "l_cancel", "jumps"]
+    __slots__ = ["state", "x", "y", "airborne", "stocks", "damage", "l_cancel",
+                 "jumps", "last_attack", "last_hit_by"]
 
     def __init__(self, pre, post):
         self.state    = post.state
@@ -371,6 +410,10 @@ class PF:
         self.damage   = post.damage
         self.l_cancel = post.l_cancel  # 1=success, 2=miss, None=not landing
         self.jumps    = post.jumps     # jumps remaining
+        # Move this player last *landed* on someone (global Attack enum / int).
+        self.last_attack = post.last_attack_landed
+        # Port that last hit this player; None / sentinel when never hit.
+        self.last_hit_by = post.last_hit_by
 
 
 # ---------------------------------------------------------------------------
@@ -1069,14 +1112,18 @@ class PunishTracker:
         self._last_dmg_frame = -999
         self._last_in_dmg    = False
         self._opener         = None   # "grab", "knockdown", "launch", or None
+        self._opener_move    = None   # specific move that opened (e.g. "down_special")
+        self._ender_move     = None   # last move landed before the sequence closed
         self._prev_state     = None   # victim state from previous frame
         self._loser_context  = "unknown"
         self._winner_context = "unknown"
         self._is_continuation = False
 
-    def feed(self, frame_idx, victim, victim_hist=None, attacker_hist=None):
+    def feed(self, frame_idx, victim, victim_hist=None, attacker_hist=None,
+             attacker_attack=None):
         state  = victim.state
         in_dmg = _sv(state) in DAMAGE_STATES
+        move   = attack_name(attacker_attack)
 
         if in_dmg:
             if frame_idx - self._last_dmg_frame > 60:
@@ -1100,6 +1147,8 @@ class PunishTracker:
 
                 self._active          = True
                 self._opener          = opener
+                self._opener_move     = move
+                self._ender_move      = move
                 self._loser_context   = loser_ctx
                 self._winner_context  = winner_ctx
                 self._is_continuation = is_cont
@@ -1109,6 +1158,8 @@ class PunishTracker:
                 self._peak_pct        = victim.damage
             elif not self._last_in_dmg:
                 self._hits += 1
+            if move is not None:
+                self._ender_move = move
             self._last_dmg_frame = frame_idx
             self._peak_pct = max(self._peak_pct, victim.damage)
         else:
@@ -1138,6 +1189,8 @@ class PunishTracker:
                 "damage":         round(dmg, 1),
                 "hits":           self._hits,
                 "opener":         self._opener,
+                "opener_move":    self._opener_move,
+                "ender_move":     self._ender_move,
                 "outcome":        outcome,
                 "loser_context":  self._loser_context,
                 "winner_context": self._winner_context,
@@ -1226,8 +1279,46 @@ class GameAnalyzer:
             self.opponent = {i: i for i in self.port_indices}
         self.state_hist = {i: StateHistory() for i in self.port_indices}
 
+        # Self-destructs + per-death geography bucket (sd/gimp/side/top)
+        self.sd_counts     = {i: 0  for i in self.port_indices}
+        self.death_buckets = {i: [] for i in self.port_indices}
+
         self._prev = {i: None for i in self.port_indices}
         self._last_pf = {i: None for i in self.port_indices}
+
+    def _is_self_destruct(self, port_idx, opp_idx, was_recovering):
+        """A death is a self-destruct only if the opponent did nothing to cause
+        it: not while recovering (rules out edgeguards / edgehogs), no recent
+        hitstun, and the opponent wasn't ledge-hanging or attacking."""
+        if was_recovering:
+            return False
+        vh = self.state_hist[port_idx]
+        if vh.had_state_in_last(GOT_HIT_STATES, 60):
+            return False
+        oh = self.state_hist.get(opp_idx)
+        if oh is not None and (oh.had_state_in_last(CLIFF_STATES, 40)
+                               or oh.had_state_in_last(ATTACK_STATES, 30)):
+            return False
+        return True
+
+    def _death_bucket(self, prev_pf, is_sd, hit_recent):
+        """Coarse death geography (approximate, no exact blast zones):
+          sd   - self-destruct (no opponent involvement)
+          top  - knockback KO out the top
+          side - knockback KO out the side
+          gimp - died offstage WITHOUT recent knockback (edgeguard / edgehog /
+                 missed recovery / spike low)
+        `hit_recent` = victim was in knockback/hitstun just before dying."""
+        if is_sd:
+            return "sd"
+        if not hit_recent or prev_pf is None:
+            return "gimp"
+        x, y = abs(prev_pf.x), prev_pf.y
+        if y >= 100:
+            return "top"
+        if y <= -50:
+            return "gimp"   # spiked / meteor'd low → offstage death
+        return "side"
 
     def run(self):
         frames = self.game.frames
@@ -1244,10 +1335,20 @@ class GameAnalyzer:
                     continue
                 curr = pfs[port_idx]
                 prev = self._prev[port_idx]
+                opp_idx = self.opponent.get(port_idx, port_idx)
 
                 # Death detection (drives edgeguard + punish death notifications)
                 died = self.deaths[port_idx].feed(frame_idx, curr)
                 if died:
+                    # Capture recovery state BEFORE notify_death() closes it.
+                    was_recovering = self.edgeguards[port_idx]._active
+                    is_sd = self._is_self_destruct(port_idx, opp_idx, was_recovering)
+                    if is_sd:
+                        self.sd_counts[port_idx] += 1
+                    hit_recent = self.state_hist[port_idx].had_state_in_last(
+                        DAMAGE_FLY_STATES | set(DAMAGE_STATES), 12)
+                    self.death_buckets[port_idx].append(
+                        self._death_bucket(prev, is_sd, hit_recent))
                     self.edgeguards[port_idx].notify_death()
                     self.punishes[port_idx].notify_death(frame_idx)
 
@@ -1261,11 +1362,11 @@ class GameAnalyzer:
                 self.postland[port_idx].feed(curr)
                 self.stgctrl[port_idx].feed(curr)
                 self.neutral[port_idx].feed(curr)
-                opp_idx = self.opponent.get(port_idx, port_idx)
                 self.punishes[port_idx].feed(
                     frame_idx, curr,
                     victim_hist=self.state_hist[port_idx],
                     attacker_hist=self.state_hist.get(opp_idx),
+                    attacker_attack=(pfs[opp_idx].last_attack if opp_idx in pfs else None),
                 )
                 self.edgeguards[port_idx].feed(frame_idx, curr, prev)
                 # push state AFTER trackers have consumed it so history lags current frame
@@ -1326,6 +1427,13 @@ class GameAnalyzer:
                 "netplay_code": nl.get("code", ""),
                 "netplay_name": nl.get("name", ""),
                 "deaths":       d.deaths,
+                "sd_count":     self.sd_counts[port_idx],
+                "death_buckets": list(self.death_buckets[port_idx]),
+                # My own recovery situations (offstage): attempts vs how many ended in death.
+                "recovery": (lambda s: {
+                    "attempts": s["above"]["attempts"] + s["below"]["attempts"],
+                    "deaths":   s["above"]["conversions"] + s["below"]["conversions"],
+                })(self.edgeguards[port_idx].summary()),
                 "tech_skill": {
                     "l_cancel_attempts": t.l_cancel_attempts,
                     "l_cancel_success":  t.l_cancel_success,

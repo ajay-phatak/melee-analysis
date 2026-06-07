@@ -204,7 +204,7 @@ def set_report(folder, count, focus_port=None, my_code=None, files=None):
         f1_s = f"{f1_rate:.0f}%  ({total_f1_prf}/{total_f1_att})" if f1_rate is not None else "N/A"
 
         out(f"    Record            : {wins}-{n - wins}")
-        out(f"    Avg stocks lost   : {avg(lambda p: p['stocks_lost']):.1f}")
+        out(f"    SDs / game        : {avg(lambda p: p.get('sd_count', 0)):.1f}")
         out(f"    Avg shield time   : {avg(lambda p: p['neutral']['shield_seconds']):.1f}s/game")
         out(f"    Avg crouch time   : {avg(lambda p: p['neutral']['crouch_seconds']):.1f}s/game")
         out(f"    Center stage      : {avg(lambda p: p['stage_control']['center_pct']):.1f}%{flag(avg(lambda p: p['stage_control']['center_pct']), 40, 60)}")

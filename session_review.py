@@ -130,14 +130,63 @@ def group_into_sets(game_summaries, pool=False):
     return sets
 
 
+# --- Gameplan distribution helpers (matchup-level neutral/punish flow) --------
+def _move_dist(seqs, key):
+    """Count seqs by a move/context key (None -> 'other')."""
+    d = {}
+    for s in seqs:
+        m = s.get(key) or "other"
+        d[m] = d.get(m, 0) + 1
+    return d
+
+
+def _opened_by(recv_seqs):
+    """How you get opened: 'their move | your mistake' -> count."""
+    d = {}
+    for s in recv_seqs:
+        move = s.get("opener_move") or "other"
+        mistake = s.get("loser_context", "unknown")
+        k = f"{move}|{mistake}"
+        d[k] = d.get(k, 0) + 1
+    return d
+
+
+def _ender_outcomes(seqs):
+    """Your ender move -> {kill/edgeguard/reset: count}."""
+    d = {}
+    for s in seqs:
+        m = s.get("ender_move") or "other"
+        o = s.get("outcome", "reset")
+        slot = d.setdefault(m, {"kill": 0, "edgeguard": 0, "reset": 0})
+        slot[o] = slot.get(o, 0) + 1
+    return d
+
+
+def _kill_moves(seqs):
+    """Moves that secured a kill -> count."""
+    d = {}
+    for s in seqs:
+        if s.get("outcome") == "kill":
+            m = s.get("ender_move") or "other"
+            d[m] = d.get(m, 0) + 1
+    return d
+
+
 def aggregate_stats(game_summaries):
     """Compute aggregate stats across games, using per-game my_port."""
     if not game_summaries:
         return None
 
     pdata      = []
-    dealt_seqs = []
+    dealt_seqs = []   # my punishes (opener/ender = mine)
+    recv_seqs  = []   # punishes on me (how I get opened, their kill moves)
     eg_above_att = eg_above_conv = eg_below_att = eg_below_conv = 0
+    sds = 0
+    recov_att = recov_deaths = 0
+    death_geo = {}    # my deaths by bucket
+    kill_geo  = {}    # opponent deaths by bucket (how I kill them)
+    center_win = []   # my center% in games I won
+    center_loss = []  # my center% in games I lost
     wins = 0
 
     for g in game_summaries:
@@ -146,10 +195,20 @@ def aggregate_stats(game_summaries):
             continue
         p = g["ports"][my_port]
         pdata.append(p)
+        recv_seqs.extend(p["punishes"]["sequences"])
+        sds += p.get("sd_count", 0)
+        recov_att    += p.get("recovery", {}).get("attempts", 0)
+        recov_deaths += p.get("recovery", {}).get("deaths", 0)
+        for b in p.get("death_buckets", []):
+            death_geo[b] = death_geo.get(b, 0) + 1
+        (center_win if p["won"] else center_loss).append(p["stage_control"]["center_pct"])
 
         opp_ports = [pi for pi in g["port_order"] if pi != my_port]
         if opp_ports and opp_ports[0] in g["ports"]:
-            dealt_seqs.extend(g["ports"][opp_ports[0]]["punishes"]["sequences"])
+            opp = g["ports"][opp_ports[0]]
+            dealt_seqs.extend(opp["punishes"]["sequences"])
+            for b in opp.get("death_buckets", []):
+                kill_geo[b] = kill_geo.get(b, 0) + 1
 
         eg_above_att  += p["edgeguard"]["above"]["attempts"]
         eg_above_conv += p["edgeguard"]["above"]["conversions"]
@@ -239,6 +298,23 @@ def aggregate_stats(game_summaries):
         "ledge_tech":     ledge_tech,
         "losses":         n - wins,
         "avg_stocks_lost": sum(p["stocks_lost"] for p in pdata) / n,
+        "avg_sds":        sds / n,
+        "recv_seqs":      recv_seqs,
+        "avg_punish_against": (sum(s["damage"] for s in recv_seqs) / len(recv_seqs)
+                               if recv_seqs else 0.0),
+        # Gameplan distributions (matchup-level)
+        "opened_by":        _opened_by(recv_seqs),
+        "opening_sources":  _move_dist(dealt_seqs, "winner_context"),
+        "opening_moves":    _move_dist(dealt_seqs, "opener_move"),
+        "string_outcomes":  _ender_outcomes(dealt_seqs),
+        "your_kill_moves":  _kill_moves(dealt_seqs),
+        "their_kill_moves": _kill_moves(recv_seqs),
+        "death_geo":        death_geo,
+        "kill_geo":         kill_geo,
+        "recovery_att":     recov_att,
+        "recovery_deaths":  recov_deaths,
+        "center_win":       (sum(center_win) / len(center_win)) if center_win else None,
+        "center_loss":      (sum(center_loss) / len(center_loss)) if center_loss else None,
         "avg_shield_s":   sum(p["neutral"]["shield_seconds"] for p in pdata) / n,
         "avg_crouch_s":   sum(p["neutral"]["crouch_seconds"] for p in pdata) / n,
         "avg_center_pct": sum(p["stage_control"]["center_pct"] for p in pdata) / n,
@@ -336,7 +412,7 @@ def _set_record(set_games):
         "losses": st["losses"],
         "files": files,
         "metrics": {
-            "avg_stocks_lost": _r(st["avg_stocks_lost"], 2),
+            "sd_per_game": _r(st["avg_sds"], 2),
             "shield_s": _r(st["avg_shield_s"]),
             "crouch_s": _r(st["avg_crouch_s"]),
             "center_pct": _r(st["avg_center_pct"]),
@@ -357,6 +433,24 @@ def _set_record(set_games):
             "galint_keep_pct": pct(lt["galint_pos"], lt["galint_n"]),
             "ledgedash_fall_avg": _r(lt["ld_fall_sum"] / lt["ld_fall_n"]) if lt["ld_fall_n"] else None,
             "ledge_hang_invuln_pct": pct(lt["hang_invuln_frames"], lt["hang_frames"]),
+        },
+        # Matchup gameplan distributions — merged per-matchup over time by coach.py.
+        "gameplan": {
+            "opened_by":        st["opened_by"],
+            "opening_sources":  st["opening_sources"],
+            "string_outcomes":  st["string_outcomes"],
+            "your_kill_moves":  st["your_kill_moves"],
+            "their_kill_moves": st["their_kill_moves"],
+            "death_geo":        st["death_geo"],
+            "kill_geo":         st["kill_geo"],
+            "recovery_att":     st["recovery_att"],
+            "recovery_deaths":  st["recovery_deaths"],
+            "dmg_per_opening_for":     _r(st["avg_punish"]),
+            "dmg_per_opening_against": _r(st["avg_punish_against"]),
+            "neutral_for":      n_opened,
+            "neutral_against":  n_lost,
+            "center_win":       _r(st["center_win"]) if st["center_win"] is not None else None,
+            "center_loss":      _r(st["center_loss"]) if st["center_loss"] is not None else None,
         },
     }
 
@@ -381,7 +475,8 @@ def pro_replays_dir(my_char, opp_char):
 
 
 # Bump when build_data's per-game structure changes, to invalidate old caches.
-PRO_CACHE_VERSION = 1
+# v2: added sd_count, death_buckets, recovery, opener_move/ender_move on punishes.
+PRO_CACHE_VERSION = 2
 PRO_CACHE_FILENAME = ".pro_cache.pkl"
 
 
@@ -484,7 +579,7 @@ def write_stats_block(stats, out, indent="    "):
     wd_s = rate_str(stats["wd_prf"], stats["wd_att"])
     f1_s = rate_str(stats["f1_prf"], stats["f1_att"])
 
-    out(f"{indent}Avg stocks lost   : {stats['avg_stocks_lost']:.1f}")
+    out(f"{indent}SDs / game        : {stats.get('avg_sds', 0.0):.1f}")
     out(f"{indent}Avg shield time   : {stats['avg_shield_s']:.1f}s/game")
     out(f"{indent}Avg crouch time   : {stats['avg_crouch_s']:.1f}s/game")
     _def = stats['avg_shield_s'] + stats['avg_crouch_s']
@@ -564,6 +659,71 @@ def write_stats_block(stats, out, indent="    "):
         out(f"{indent}Punish outcomes   : {stats['kills']} kills / {stats['edgeguards']} edgeguards / {stats['resets']} resets  ({100*stats['kills']//total}% kill rate)")
     out(f"{indent}Edgeguard (above) : {rate_str(stats['eg_above_conv'], stats['eg_above_att'])}")
     out(f"{indent}Edgeguard (below) : {rate_str(stats['eg_below_conv'], stats['eg_below_att'])}")
+    _write_gameplan_block(stats, out, indent)
+
+
+def _fmt_pct_dist(d, top=4):
+    """'{key} NN% · ...' for the top entries of a {key: count} dict."""
+    tot = sum(d.values())
+    if not tot:
+        return "—"
+    items = sorted(d.items(), key=lambda kv: kv[1], reverse=True)[:top]
+    return " · ".join(f"{k} {round(100*v/tot)}%" for k, v in items)
+
+
+MISTAKE_SHORT = {
+    "caught_neutral": "caught", "grabbed_neutral": "grabbed",
+    "landing_lag": "landing-lag", "whiffed": "whiffed",
+    "attacked_into_shield": "OOS", "attacked_cc_grabbed": "CC'd",
+    "missed_tech": "tech-chase", "reversal_victim": "reversed",
+    "airdodged": "airdodge", "unknown": "?",
+}
+
+
+def _write_gameplan_block(stats, out, indent):
+    """Neutral/punish-flow lines (matchup gameplan view)."""
+    opened = stats.get("opened_by") or {}
+    if opened:
+        tot = sum(opened.values())
+        items = sorted(opened.items(), key=lambda kv: kv[1], reverse=True)[:4]
+        parts = []
+        for k, v in items:
+            move, _, mistake = k.partition("|")
+            parts.append(f"{move}→{MISTAKE_SHORT.get(mistake, mistake)} {round(100*v/tot)}%")
+        out(f"{indent}Got opened by     : {' · '.join(parts)}")
+    src = stats.get("opening_sources") or {}
+    if src:
+        out(f"{indent}You open with     : {_fmt_pct_dist(src)}")
+    so = stats.get("string_outcomes") or {}
+    if so:
+        flat = []
+        for move, oc in so.items():
+            for outcome, c in oc.items():
+                if c:
+                    flat.append((f"{move}→{outcome}", c))
+        flat.sort(key=lambda kv: kv[1], reverse=True)
+        out(f"{indent}Strings end       : " + " · ".join(f"{k} {c}" for k, c in flat[:6]))
+    ykm = stats.get("your_kill_moves") or {}
+    tkm = stats.get("their_kill_moves") or {}
+    if ykm or tkm:
+        out(f"{indent}Your kill moves   : {_fmt_pct_dist(ykm) if ykm else '—'}")
+        out(f"{indent}Their kill moves  : {_fmt_pct_dist(tkm) if tkm else '—'}")
+    dfor = stats.get("avg_punish")
+    dag  = stats.get("avg_punish_against")
+    if dfor is not None and dag is not None:
+        out(f"{indent}Dmg per opening   : you {dfor:.1f}% / them {dag:.1f}%")
+    dg = stats.get("death_geo") or {}
+    kg = stats.get("kill_geo") or {}
+    if dg:
+        out(f"{indent}You die           : {_fmt_pct_dist(dg)}")
+    if kg:
+        out(f"{indent}You kill (where)  : {_fmt_pct_dist(kg)}")
+    ra, rd = stats.get("recovery_att", 0), stats.get("recovery_deaths", 0)
+    if ra:
+        out(f"{indent}Recovery back     : {round(100*(ra-rd)/ra)}%  ({ra-rd}/{ra} offstage trips)")
+    cw, cl = stats.get("center_win"), stats.get("center_loss")
+    if cw is not None and cl is not None:
+        out(f"{indent}Center (W vs L)   : {cw:.0f}% in wins / {cl:.0f}% in losses")
 
 
 LOSER_LABELS = {

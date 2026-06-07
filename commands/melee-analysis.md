@@ -31,8 +31,13 @@ python coach.py trends --history "path/to/history.json" --out trends.txt
 
 5. **(Optional) Update Obsidian** via the `obsidian-mcp-connector` (vault-relative paths). Create the folder/notes if missing; update existing notes in place. Suggested layout under a `Melee Coach/` folder:
    - `Melee Coach/Sessions/YYYY-MM-DD.md` — one note per session: frontmatter (date, record, matchups) + a section per matchup-set with headline metrics, terse findings, and a "vs your trend" line.
-   - `Melee Coach/Matchups/<my_char> vs <opp_char>.md` — per-matchup: running record, a short "what works / what to fix", and a dated log table.
-   - `Melee Coach/Progress.md` — dashboard regenerated from `trends.txt`: metric trajectory table, per-matchup records, and a terse **Current focuses** list.
+   - `Melee Coach/Matchups/<my_char> vs <opp_char>.md` — per-matchup **neutral gameplan / flowchart** (NOT tech-skill — that lives in `Progress.md`). Built from the `trends.txt` MATCHUP GAMEPLANS block (running aggregate) + this session's `session.txt` lines:
+     - **Neutral** — neutral score (your openings vs theirs); how you get opened (their starter → your mistake, with the biggest one as a flowchart fix); your opening sources.
+     - **Conversion** — how your strings end (flag heavy `uptilt→reset` = missed kill-confirm / SDI'd out; praise `uair/fair→kill`, `fair/bair→edgeguard`); your kill moves vs theirs; damage per opening both ways.
+     - **Stocks** — death/kill geography (gimp/side/top/SD); recovery success; edgeguard (above/below).
+     - **Positioning** — center-stage control + win/loss correlation.
+     - Running record header + dated log row. No L-cancel/wavedash/ledgedash bullets here.
+   - `Melee Coach/Progress.md` — dashboard (tech-skill focuses live here), regenerated from `trends.txt`: metric trajectory table (includes **SDs/game**, no stocks-lost), per-matchup records, and a terse **Current focuses** list.
 
 6. **Coach in chat — present BOTH layers:** this session's headline stats + pro-baseline gaps, AND the long-term trends (what's improving / declining / stuck, per-matchup records). Give actionable focuses.
 
@@ -40,4 +45,5 @@ python coach.py trends --history "path/to/history.json" --out trends.txt
 - **Two reference frames:** pro baseline (`session.txt`) = "vs the ceiling"; trends (`trends.txt`) = "vs your past self."
 - `history.json` is the source of truth (personal — keep it out of any shared repo). Obsidian notes are generated views, regenerable from history.
 - Sets split by matchup `(opponent, my char, opp char)`.
+- **SDs** (self-destructs, edgehog-aware) replace "stocks lost" as the tracked durability metric. Matchup notes use **gameplan** data: opener/ender moves (`down_special` = shine, `dthrow`, `uair`, …), death/kill geography, recovery, and damage-per-opening — all in `session.txt` (per set) and `trends.txt` (per-matchup running aggregate).
 - If a set shows `[no pro replays for X vs Y]`, `fetch_pro_replays.py` will add that matchup's baseline.
