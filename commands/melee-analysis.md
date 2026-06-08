@@ -34,7 +34,7 @@ python coach.py trends --history "path/to/history.json" --out trends.txt
    - `Melee Coach/Matchups/<my_char> vs <opp_char>.md` — per-matchup **neutral gameplan / flowchart** (NOT tech-skill — that lives in `Progress.md`). Built from the `trends.txt` MATCHUP GAMEPLANS block (running aggregate) + this session's `session.txt` lines:
      - **Neutral** — neutral score (your openings vs theirs); how you get opened (their starter → your mistake, with the biggest one as a flowchart fix); your opening sources.
      - **Conversion** — how your strings end (flag heavy `uptilt→reset` = missed kill-confirm / SDI'd out; praise `uair/fair→kill`, `fair/bair→edgeguard`); your kill moves vs theirs; damage per opening both ways.
-     - **Stocks** — death/kill geography (gimp/side/top/SD); recovery success; edgeguard (above/below).
+     - **Stocks** — death/kill geography (edgehog/side/top/SD); recovery success; edgeguard (above/below).
      - **Positioning** — center-stage control + win/loss correlation.
      - Running record header + dated log row. No L-cancel/wavedash/ledgedash bullets here.
    - `Melee Coach/Progress.md` — dashboard (tech-skill focuses live here), regenerated from `trends.txt`: metric trajectory table (includes **SDs/game**, no stocks-lost), per-matchup records, and a terse **Current focuses** list.

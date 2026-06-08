@@ -1321,7 +1321,7 @@ class GameAnalyzer:
             self.opponent = {i: i for i in self.port_indices}
         self.state_hist = {i: StateHistory() for i in self.port_indices}
 
-        # Self-destructs + per-death geography bucket (sd/gimp/side/top)
+        # Self-destructs + per-death geography bucket (sd/edgehog/side/top)
         self.sd_counts     = {i: 0  for i in self.port_indices}
         self.death_buckets = {i: [] for i in self.port_indices}
 
@@ -1345,21 +1345,21 @@ class GameAnalyzer:
 
     def _death_bucket(self, prev_pf, is_sd, hit_recent):
         """Coarse death geography (approximate, no exact blast zones):
-          sd   - self-destruct (no opponent involvement)
-          top  - knockback KO out the top
-          side - knockback KO out the side
-          gimp - died offstage WITHOUT recent knockback (edgeguard / edgehog /
-                 missed recovery / spike low)
+          sd      - self-destruct (no opponent involvement)
+          top     - knockback KO out the top
+          side    - knockback KO out the side
+          edgehog - died offstage WITHOUT recent knockback (opponent edgeguarded
+                    you: ledge-hog, walled-out / missed recovery, low spike)
         `hit_recent` = victim was in knockback/hitstun just before dying."""
         if is_sd:
             return "sd"
         if not hit_recent or prev_pf is None:
-            return "gimp"
+            return "edgehog"
         x, y = abs(prev_pf.x), prev_pf.y
         if y >= 100:
             return "top"
         if y <= -50:
-            return "gimp"   # spiked / meteor'd low → offstage death
+            return "edgehog"   # spiked / meteor'd low → offstage death
         return "side"
 
     def run(self):
