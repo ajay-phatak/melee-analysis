@@ -184,6 +184,25 @@ GROUND_ATTACK_STATES = ATTACK_STATES - frozenset({
     ActionState.ATTACK_AIR_HI, ActionState.ATTACK_AIR_LW,
 }) - frozenset({ActionState.ATTACK_DASH})
 DASH_STATES = frozenset({ActionState.DASH, ActionState.RUN, ActionState.RUN_DIRECT})
+# Attack ActionState -> short move label, for naming the *victim's own* move
+# when their attack created the opponent's opening (whiff-punished, shield-
+# grabbed, CC-grabbed, reversal'd). Specials use char-specific state IDs and
+# stay unnamed — consistent with the classifier, which only checks ATTACK_STATES.
+ATTACK_STATE_NAME_MAP = {
+    ActionState.ATTACK_11: "jab", ActionState.ATTACK_12: "jab", ActionState.ATTACK_13: "jab",
+    ActionState.ATTACK_DASH: "dash_attack",
+    ActionState.ATTACK_S_3_HI: "ftilt", ActionState.ATTACK_S_3_HI_S: "ftilt",
+    ActionState.ATTACK_S_3_S: "ftilt",
+    ActionState.ATTACK_S_3_LW_S: "ftilt", ActionState.ATTACK_S_3_LW: "ftilt",
+    ActionState.ATTACK_HI_3: "utilt", ActionState.ATTACK_LW_3: "dtilt",
+    ActionState.ATTACK_S_4_HI: "fsmash", ActionState.ATTACK_S_4_HI_S: "fsmash",
+    ActionState.ATTACK_S_4_S: "fsmash",
+    ActionState.ATTACK_S_4_LW_S: "fsmash", ActionState.ATTACK_S_4_LW: "fsmash",
+    ActionState.ATTACK_HI_4: "usmash", ActionState.ATTACK_LW_4: "dsmash",
+    ActionState.ATTACK_AIR_N: "nair", ActionState.ATTACK_AIR_F: "fair",
+    ActionState.ATTACK_AIR_B: "bair", ActionState.ATTACK_AIR_HI: "uair",
+    ActionState.ATTACK_AIR_LW: "dair",
+}
 LANDING_STATES = frozenset({
     ActionState.LANDING, ActionState.LANDING_FALL_SPECIAL,
     ActionState.LANDING_AIR_N, ActionState.LANDING_AIR_F,
@@ -1016,6 +1035,19 @@ class EdgeguardTracker:
 NEUTRAL_LOOKBACK = 20  # frames to look back when classifying neutral events
 ATTACK_LOOKBACK  = 8   # shorter window for identifying attacker's own recent action
 
+# Loser contexts where the victim's own attack created the opening, so the
+# specific move can be named from their state history.
+ATTACK_LOSER_CONTEXTS = frozenset({
+    "whiffed", "attacked_into_shield", "attacked_cc_grabbed", "reversal_victim",
+})
+# "Attacker was recovering" hint for reversals: helpless up-B fall or ledge
+# states in their recent history mean the victim's failed hit was an edgeguard
+# attempt, not an onstage combo extension. ESCAPE_AIR is deliberately excluded
+# (an onstage combo victim airdodging out would false-positive).
+EDGE_RECOVERY_HINT = frozenset({
+    ActionState.FALL_SPECIAL, ActionState.FALL_SPECIAL_F, ActionState.FALL_SPECIAL_B,
+}) | frozenset(CLIFF_STATES)
+
 class StateHistory:
     """Rolling 60-frame window of ActionState for one port."""
     def __init__(self, maxlen=60):
@@ -1029,6 +1061,13 @@ class StateHistory:
             if s in state_set:
                 return True
         return False
+
+    def last_state_in(self, state_set, n_frames):
+        """Most recent state from state_set within the last n_frames, or None."""
+        for s in reversed(list(self._buf)[-n_frames:]):
+            if s in state_set:
+                return s
+        return None
 
 
 def _classify_neutral_event(opener_type, victim_hist, attacker_hist):
@@ -1141,6 +1180,9 @@ class PunishTracker:
         self._loser_context  = "unknown"
         self._winner_context = "unknown"
         self._is_continuation = False
+        self._hit_log        = []     # [move_or_None, victim_pct] per counted hit
+        self._loser_move     = None   # victim's own move that created the opening
+        self._reversal_kind  = None   # "edgeguard_try"/"combo_extension" on reversals
 
     def feed(self, frame_idx, victim, victim_hist=None, attacker_hist=None,
              attacker_attack=None):
@@ -1182,6 +1224,22 @@ class PunishTracker:
                     opener, victim_hist, attacker_hist
                 )
 
+                # Name the victim's own move when their attack created the opening.
+                loser_move = None
+                if loser_ctx in ATTACK_LOSER_CONTEXTS and victim_hist is not None:
+                    ls = victim_hist.last_state_in(ATTACK_STATES, NEUTRAL_LOOKBACK)
+                    loser_move = ATTACK_STATE_NAME_MAP.get(ls)
+                # Reversal context: failed edgeguard attempt vs onstage combo
+                # extension. Either the victim was offstage when reversed, or
+                # the attacker had recently been in recovery/ledge states.
+                reversal_kind = None
+                if loser_ctx == "reversal_victim":
+                    offstage   = abs(victim.x) > self.ledge_x
+                    recovering = (attacker_hist is not None and
+                                  attacker_hist.had_state_in_last(EDGE_RECOVERY_HINT, 45))
+                    reversal_kind = ("edgeguard_try" if (offstage or recovering)
+                                     else "combo_extension")
+
                 self._active          = True
                 self._opener          = opener
                 self._opener_move     = move
@@ -1189,14 +1247,22 @@ class PunishTracker:
                 self._loser_context   = loser_ctx
                 self._winner_context  = winner_ctx
                 self._is_continuation = is_cont
+                self._loser_move      = loser_move
+                self._reversal_kind   = reversal_kind
                 self._start_pct       = victim.damage
                 self._start_frame     = frame_idx
                 self._hits            = 1
                 self._peak_pct        = victim.damage
+                self._hit_log         = [[move, round(victim.damage, 1)]]
             elif not self._last_in_hit:
                 self._hits += 1
+                self._hit_log.append([move, round(victim.damage, 1)])
             if move is not None:
                 self._ender_move = move
+                if self._hit_log:
+                    # last_attack_landed can lag the hit by a frame — backfill
+                    # the newest hit entry once the move name resolves.
+                    self._hit_log[-1][0] = move
             self._last_dmg_frame = frame_idx
             self._peak_pct = max(self._peak_pct, victim.damage)
         else:
@@ -1229,13 +1295,18 @@ class PunishTracker:
                 "frame":          self._start_frame,
                 "time":           frames_to_time(self._start_frame),
                 "damage":         round(dmg, 1),
+                "start_pct":      round(self._start_pct, 1),
+                "end_pct":        round(self._peak_pct, 1),
                 "hits":           self._hits,
+                "hit_moves":      [list(h) for h in self._hit_log],
                 "opener":         self._opener,
                 "opener_move":    self._opener_move,
                 "ender_move":     self._ender_move,
                 "outcome":        outcome,
                 "loser_context":  self._loser_context,
                 "winner_context": self._winner_context,
+                "loser_move":     self._loser_move,
+                "reversal_kind":  self._reversal_kind,
                 "is_continuation": self._is_continuation,
             })
         self._active = False
@@ -1767,6 +1838,7 @@ def format_report(game_data, focus_port=None):
             out(f"    Largest punishes:")
             for s in sorted(seqs, key=lambda x: -x["damage"])[:5]:
                 out(f"      [{s['time']}]  {s['damage']:.1f}%  "
+                    f"({s.get('start_pct', 0):.0f}->{s.get('end_pct', 0):.0f}%)  "
                     f"~{s['hits']} hit(s)  -> {s['outcome']}")
         else:
             out(f"    No punish sequences detected")

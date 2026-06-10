@@ -172,6 +172,100 @@ def _kill_moves(seqs):
     return d
 
 
+# Percent buckets for percent-aware punish analysis, keyed by the victim's
+# percent when the opening happened (start_pct of the sequence).
+PCT_BUCKETS = ((0, 35, "0-34"), (35, 80, "35-79"), (80, 120, "80-119"), (120, 10**9, "120+"))
+PCT_BUCKET_ORDER = tuple(label for _, _, label in PCT_BUCKETS)
+
+
+def _pct_bucket(p):
+    for lo, hi, label in PCT_BUCKETS:
+        if lo <= p < hi:
+            return label
+    return PCT_BUCKET_ORDER[-1]
+
+
+def _string_by_pct(seqs):
+    """Start-percent bucket -> outcome counts + damage (conversion by %)."""
+    d = {}
+    for s in seqs:
+        sp = s.get("start_pct")
+        if sp is None:
+            continue
+        b = d.setdefault(_pct_bucket(sp),
+                         {"n": 0, "kill": 0, "edgeguard": 0, "reset": 0, "dmg_sum": 0.0})
+        b["n"] += 1
+        o = s.get("outcome", "reset")
+        b[o] = b.get(o, 0) + 1
+        b["dmg_sum"] += s.get("damage", 0.0)
+    return d
+
+
+def _kill_pcts(seqs):
+    """Killing move -> {n, sum_pct}: the percent victims die at, per move."""
+    d = {}
+    for s in seqs:
+        if s.get("outcome") != "kill":
+            continue
+        ep = s.get("end_pct")
+        if ep is None:
+            continue
+        m = s.get("ender_move") or "other"
+        slot = d.setdefault(m, {"n": 0, "sum_pct": 0.0})
+        slot["n"] += 1
+        slot["sum_pct"] += ep
+    return d
+
+
+def _followups(seqs):
+    """'opener_move|pct_bucket' -> {second_hit_move_or_'end': count}.
+    The punish tree: given an opener at a percent range, what came next
+    ('end' = the string stopped after the opening hit)."""
+    d = {}
+    for s in seqs:
+        sp = s.get("start_pct")
+        if sp is None:
+            continue
+        opener = s.get("opener_move") or "other"
+        key = f"{opener}|{_pct_bucket(sp)}"
+        hits = s.get("hit_moves") or []
+        nxt = (hits[1][0] or "other") if len(hits) >= 2 else "end"
+        slot = d.setdefault(key, {})
+        slot[nxt] = slot.get(nxt, 0) + 1
+    return d
+
+
+def _reversal_summary(recv_seqs):
+    """Reversals against you: an ill-conceived combo extension / edgeguard
+    attempt that became the opponent's opening, with its cost."""
+    out = {"n": 0, "stocks": 0, "dmg_sum": 0.0, "pct_sum": 0.0,
+           "kinds": {}, "moves": {}}
+    for s in recv_seqs:
+        if s.get("loser_context") != "reversal_victim":
+            continue
+        out["n"] += 1
+        out["dmg_sum"] += s.get("damage", 0.0)
+        out["pct_sum"] += s.get("start_pct") or 0.0
+        if s.get("outcome") == "kill":
+            out["stocks"] += 1
+        k = s.get("reversal_kind") or "unknown"
+        out["kinds"][k] = out["kinds"].get(k, 0) + 1
+        m = s.get("loser_move")
+        if m:
+            out["moves"][m] = out["moves"].get(m, 0) + 1
+    return out
+
+
+def _punished_moves(recv_seqs):
+    """Your own move that created the opponent's opening -> count."""
+    d = {}
+    for s in recv_seqs:
+        m = s.get("loser_move")
+        if m:
+            d[m] = d.get(m, 0) + 1
+    return d
+
+
 def aggregate_stats(game_summaries):
     """Compute aggregate stats across games, using per-game my_port."""
     if not game_summaries:
@@ -309,6 +403,14 @@ def aggregate_stats(game_summaries):
         "string_outcomes":  _ender_outcomes(dealt_seqs),
         "your_kill_moves":  _kill_moves(dealt_seqs),
         "their_kill_moves": _kill_moves(recv_seqs),
+        # Percent-aware punish analysis (your strings, bucketed by start %)
+        "string_by_pct":    _string_by_pct(dealt_seqs),
+        "followups":        _followups(dealt_seqs),
+        "kill_pcts":        _kill_pcts(dealt_seqs),
+        "their_kill_pcts":  _kill_pcts(recv_seqs),
+        # Reversal ledger + which of your own moves get punished
+        "reversals":        _reversal_summary(recv_seqs),
+        "punished_moves":   _punished_moves(recv_seqs),
         "death_geo":        death_geo,
         "kill_geo":         kill_geo,
         "recovery_att":     recov_att,
@@ -381,6 +483,12 @@ def _r(x, nd=1):
     return round(x, nd) if x is not None else None
 
 
+def _avg_kill_pct(kill_pcts):
+    """Overall average kill percent from a {move: {n, sum_pct}} dict."""
+    n = sum(v["n"] for v in kill_pcts.values())
+    return round(sum(v["sum_pct"] for v in kill_pcts.values()) / n, 1) if n else None
+
+
 def _set_record(set_games):
     """Flatten one matchup-set into a JSON-friendly record for the long-term coach.
     Reuses aggregate_stats (you) and aggregate_stats_opponent (neutral lost)."""
@@ -433,6 +541,8 @@ def _set_record(set_games):
             "galint_keep_pct": pct(lt["galint_pos"], lt["galint_n"]),
             "ledgedash_fall_avg": _r(lt["ld_fall_sum"] / lt["ld_fall_n"]) if lt["ld_fall_n"] else None,
             "ledge_hang_invuln_pct": pct(lt["hang_invuln_frames"], lt["hang_frames"]),
+            "avg_kill_pct": _avg_kill_pct(st["kill_pcts"]),
+            "reversals_per_game": _r(st["reversals"]["n"] / st["games"], 2),
         },
         # Matchup gameplan distributions — merged per-matchup over time by coach.py.
         "gameplan": {
@@ -451,6 +561,12 @@ def _set_record(set_games):
             "neutral_against":  n_lost,
             "center_win":       _r(st["center_win"]) if st["center_win"] is not None else None,
             "center_loss":      _r(st["center_loss"]) if st["center_loss"] is not None else None,
+            "string_by_pct":    st["string_by_pct"],
+            "followups":        st["followups"],
+            "kill_pcts":        st["kill_pcts"],
+            "their_kill_pcts":  st["their_kill_pcts"],
+            "reversals":        st["reversals"],
+            "punished_moves":   st["punished_moves"],
         },
     }
 
@@ -477,7 +593,8 @@ def pro_replays_dir(my_char, opp_char):
 # Bump when build_data's per-game structure changes, to invalidate old caches.
 # v2: added sd_count, death_buckets, recovery, opener_move/ender_move on punishes.
 # v3: punish tracker now captures throws + tech-chases (dthrow strings).
-PRO_CACHE_VERSION = 3
+# v4: start/end percent + per-hit move log on punishes; loser_move/reversal_kind.
+PRO_CACHE_VERSION = 4
 PRO_CACHE_FILENAME = ".pro_cache.pkl"
 
 
@@ -672,6 +789,17 @@ def _fmt_pct_dist(d, top=4):
     return " · ".join(f"{k} {round(100*v/tot)}%" for k, v in items)
 
 
+def _fmt_kill_pcts(d, top=4):
+    """'avg NN% (move NN% xK · ...)' from a {move: {n, sum_pct}} dict."""
+    tot_n = sum(v["n"] for v in d.values())
+    if not tot_n:
+        return "—"
+    avg = sum(v["sum_pct"] for v in d.values()) / tot_n
+    items = sorted(d.items(), key=lambda kv: -kv[1]["n"])[:top]
+    moves = " · ".join(f"{m} {v['sum_pct']/v['n']:.0f}% x{v['n']}" for m, v in items)
+    return f"avg {avg:.0f}% ({moves})"
+
+
 MISTAKE_SHORT = {
     "caught_neutral": "caught", "grabbed_neutral": "grabbed",
     "landing_lag": "landing-lag", "whiffed": "whiffed",
@@ -704,15 +832,70 @@ def _write_gameplan_block(stats, out, indent):
                     flat.append((f"{move}→{outcome}", c))
         flat.sort(key=lambda kv: kv[1], reverse=True)
         out(f"{indent}Strings end       : " + " · ".join(f"{k} {c}" for k, c in flat[:6]))
+    sbp = stats.get("string_by_pct") or {}
+    if sbp:
+        parts = []
+        for label in PCT_BUCKET_ORDER:
+            b = sbp.get(label)
+            if not b or not b.get("n"):
+                continue
+            finished = b.get("kill", 0) + b.get("edgeguard", 0)
+            parts.append(f"{label}: {round(100*finished/b['n'])}% kill/eg (n={b['n']})")
+        if parts:
+            out(f"{indent}Convert by %      : {' · '.join(parts)}")
+    fu = stats.get("followups") or {}
+    if fu:
+        # Group by opener; show the punish tree for the top openers.
+        by_opener = {}
+        for key, dist in fu.items():
+            opener, _, bucket = key.partition("|")
+            by_opener.setdefault(opener, {})[bucket] = dist
+        top_openers = sorted(
+            by_opener.items(),
+            key=lambda kv: -sum(sum(d.values()) for d in kv[1].values()))[:2]
+        for opener, buckets in top_openers:
+            if opener == "other":
+                continue
+            parts = []
+            for label in PCT_BUCKET_ORDER:
+                dist = buckets.get(label)
+                if not dist:
+                    continue
+                tot = sum(dist.values())
+                tops = sorted(dist.items(), key=lambda kv: -kv[1])[:3]
+                inner = "/".join(f"{m} {round(100*c/tot)}%" for m, c in tops)
+                parts.append(f"{label}: {inner}")
+            if parts:
+                out(f"{indent}After {opener:<12}: {' · '.join(parts)}")
     ykm = stats.get("your_kill_moves") or {}
     tkm = stats.get("their_kill_moves") or {}
     if ykm or tkm:
         out(f"{indent}Your kill moves   : {_fmt_pct_dist(ykm) if ykm else '—'}")
         out(f"{indent}Their kill moves  : {_fmt_pct_dist(tkm) if tkm else '—'}")
+    ykp = stats.get("kill_pcts") or {}
+    tkp = stats.get("their_kill_pcts") or {}
+    if ykp or tkp:
+        out(f"{indent}Kill percent      : you {_fmt_kill_pcts(ykp)}")
+        out(f"{indent}Die at            : {_fmt_kill_pcts(tkp)}")
     dfor = stats.get("avg_punish")
     dag  = stats.get("avg_punish_against")
     if dfor is not None and dag is not None:
         out(f"{indent}Dmg per opening   : you {dfor:.1f}% / them {dag:.1f}%")
+    rv = stats.get("reversals") or {}
+    if rv.get("n"):
+        n = rv["n"]
+        kinds = rv.get("kinds") or {}
+        line = (f"{n} (eg-try {kinds.get('edgeguard_try', 0)} / "
+                f"combo-ext {kinds.get('combo_extension', 0)})  "
+                f"cost {rv['dmg_sum']/n:.0f}%/ea")
+        if rv.get("stocks"):
+            line += f" + {rv['stocks']} stock(s)"
+        if rv.get("moves"):
+            line += f"  via {_fmt_pct_dist(rv['moves'], top=3)}"
+        out(f"{indent}Reversed          : {line}")
+    pm = stats.get("punished_moves") or {}
+    if pm:
+        out(f"{indent}You're punished on: {_fmt_pct_dist(pm)}")
     dg = stats.get("death_geo") or {}
     kg = stats.get("kill_geo") or {}
     if dg:

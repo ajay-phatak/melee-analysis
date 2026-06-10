@@ -42,6 +42,8 @@ METRICS = {
     "neutral_win_pct":     ("Neutral win %",        True,  2.0, "{:.0f}%"),
     "kill_rate_pct":       ("Kill rate",            True,  1.0, "{:.0f}%"),
     "punish_pct":          ("Avg punish %",         True,  0.7, "{:.1f}%"),
+    "avg_kill_pct":        ("Avg kill %",           False, 4.0, "{:.0f}%"),
+    "reversals_per_game":  ("Reversals/game",       False, 0.3, "{:.2f}"),
     "edgeguard_below_pct": ("Edgeguard below %",    True,  3.0, "{:.0f}%"),
     "wavedash_pct":        ("Wavedash %",           True,  2.0, "{:.0f}%"),
     "f1_pct":              ("Frame-1 aerial %",     True,  2.0, "{:.0f}%"),
@@ -212,7 +214,11 @@ def _merge_gameplan(recs):
     are skipped gracefully."""
     g = {k: {} for k in ("opened_by", "opening_sources", "string_outcomes",
                          "your_kill_moves", "their_kill_moves",
-                         "death_geo", "kill_geo")}
+                         "death_geo", "kill_geo",
+                         "string_by_pct", "followups",
+                         "kill_pcts", "their_kill_pcts", "punished_moves")}
+    rv = {"n": 0, "stocks": 0, "dmg_sum": 0.0, "pct_sum": 0.0,
+          "kinds": {}, "moves": {}}
     recov_att = recov_deaths = nf = na = 0
     dfn = dfd = dan = dad = cwn = cwd = cln = cld = 0.0
     for r in recs:
@@ -224,6 +230,18 @@ def _merge_gameplan(recs):
         _merge_counts(g["their_kill_moves"], gp.get("their_kill_moves"))
         _merge_counts(g["death_geo"], gp.get("death_geo"))
         _merge_counts(g["kill_geo"], gp.get("kill_geo"))
+        _merge_nested(g["string_by_pct"], gp.get("string_by_pct"))
+        _merge_nested(g["followups"], gp.get("followups"))
+        _merge_nested(g["kill_pcts"], gp.get("kill_pcts"))
+        _merge_nested(g["their_kill_pcts"], gp.get("their_kill_pcts"))
+        _merge_counts(g["punished_moves"], gp.get("punished_moves"))
+        r_rv = gp.get("reversals") or {}
+        rv["n"]       += r_rv.get("n", 0)
+        rv["stocks"]  += r_rv.get("stocks", 0)
+        rv["dmg_sum"] += r_rv.get("dmg_sum", 0.0)
+        rv["pct_sum"] += r_rv.get("pct_sum", 0.0)
+        _merge_counts(rv["kinds"], r_rv.get("kinds"))
+        _merge_counts(rv["moves"], r_rv.get("moves"))
         recov_att    += gp.get("recovery_att", 0)
         recov_deaths += gp.get("recovery_deaths", 0)
         f, ag = gp.get("neutral_for", 0), gp.get("neutral_against", 0)
@@ -237,6 +255,7 @@ def _merge_gameplan(recs):
             cwn += gp["center_win"] * ng; cwd += ng
         if gp.get("center_loss") is not None:
             cln += gp["center_loss"] * ng; cld += ng
+    g["reversals"] = rv
     g["recovery_att"], g["recovery_deaths"] = recov_att, recov_deaths
     g["neutral_for"], g["neutral_against"] = nf, na
     g["dmg_per_opening_for"]     = round(dfn / dfd, 1) if dfd else None
@@ -368,13 +387,34 @@ def render_trends(tr):
             a(f"    You open    : {_fmt_dist(gp['opening_sources'])}")
         if gp.get("string_outcomes"):
             a(f"    Strings end : {_fmt_string_outcomes(gp['string_outcomes'])}")
+        if gp.get("string_by_pct"):
+            a(f"    Convert by %: {_fmt_string_by_pct(gp['string_by_pct'])}")
+        for opener, line in _top_followups(gp.get("followups") or {}):
+            a(f"    After {opener:<6}: {line}")
         ykm, tkm = gp.get("your_kill_moves") or {}, gp.get("their_kill_moves") or {}
         if ykm or tkm:
             a(f"    Kill moves  : you {_fmt_dist(ykm) if ykm else '—'}  |  "
               f"them {_fmt_dist(tkm) if tkm else '—'}")
+        ykp, tkp = gp.get("kill_pcts") or {}, gp.get("their_kill_pcts") or {}
+        if ykp or tkp:
+            a(f"    Kill %      : you {_fmt_kill_pcts(ykp)}  |  "
+              f"die at {_fmt_kill_pcts(tkp)}")
         df, da = gp.get("dmg_per_opening_for"), gp.get("dmg_per_opening_against")
         if df is not None and da is not None:
             a(f"    Dmg/opening : you {df:.1f}% / them {da:.1f}%")
+        rv = gp.get("reversals") or {}
+        if rv.get("n"):
+            kinds = rv.get("kinds") or {}
+            line = (f"{rv['n']} (eg-try {kinds.get('edgeguard_try', 0)} / "
+                    f"combo-ext {kinds.get('combo_extension', 0)})  "
+                    f"cost {rv['dmg_sum']/rv['n']:.0f}%/ea")
+            if rv.get("stocks"):
+                line += f" + {rv['stocks']} stock(s)"
+            if rv.get("moves"):
+                line += f"  via {_fmt_dist(rv['moves'], top=3)}"
+            a(f"    Reversed    : {line}")
+        if gp.get("punished_moves"):
+            a(f"    Punished on : {_fmt_dist(gp['punished_moves'])}")
         if gp.get("death_geo"):
             a(f"    You die     : {_fmt_dist(gp['death_geo'])}")
         if gp.get("kill_geo"):
@@ -393,12 +433,66 @@ def render_trends(tr):
 
 
 # --- gameplan formatting helpers ---------------------------------------------
+# Render order for the percent buckets produced by session_review.py.
+_PCT_ORDER = ("0-34", "35-79", "80-119", "120+")
+
+
 def _fmt_dist(d, top=4):
     tot = sum(d.values())
     if not tot:
         return "—"
     items = sorted(d.items(), key=lambda kv: kv[1], reverse=True)[:top]
     return " · ".join(f"{k} {round(100*v/tot)}%" for k, v in items)
+
+
+def _fmt_string_by_pct(sbp):
+    """'0-34 12% (n=17) · ...' — share of strings ending in kill/edgeguard."""
+    parts = []
+    for label in _PCT_ORDER:
+        b = sbp.get(label)
+        if not b or not b.get("n"):
+            continue
+        finished = b.get("kill", 0) + b.get("edgeguard", 0)
+        parts.append(f"{label} {round(100*finished/b['n'])}% (n={b['n']})")
+    return " · ".join(parts) or "—"
+
+
+def _fmt_kill_pcts(d, top=3):
+    """'avg NN% (move NN xK · ...)' from a {move: {n, sum_pct}} dict."""
+    tot = sum(v.get("n", 0) for v in d.values())
+    if not tot:
+        return "—"
+    avg = sum(v.get("sum_pct", 0.0) for v in d.values()) / tot
+    items = sorted(d.items(), key=lambda kv: -kv[1].get("n", 0))[:top]
+    moves = " · ".join(f"{m} {v['sum_pct']/v['n']:.0f} x{v['n']}" for m, v in items)
+    return f"avg {avg:.0f}% ({moves})"
+
+
+def _top_followups(fu, n_openers=2, n_moves=3):
+    """[(opener, rendered_line)] for the most common openers in a
+    {'opener|bucket': {next_move_or_end: count}} followup tree."""
+    by_opener = {}
+    for key, dist in fu.items():
+        opener, _, bucket = key.partition("|")
+        by_opener.setdefault(opener, {})[bucket] = dist
+    top = sorted(by_opener.items(),
+                 key=lambda kv: -sum(sum(d.values()) for d in kv[1].values()))[:n_openers]
+    out = []
+    for opener, buckets in top:
+        if opener == "other":
+            continue
+        parts = []
+        for label in _PCT_ORDER:
+            dist = buckets.get(label)
+            if not dist:
+                continue
+            tot = sum(dist.values())
+            tops = sorted(dist.items(), key=lambda kv: -kv[1])[:n_moves]
+            inner = "/".join(f"{m} {round(100*c/tot)}%" for m, c in tops)
+            parts.append(f"{label}: {inner}")
+        if parts:
+            out.append((opener, " · ".join(parts)))
+    return out
 
 
 _MISTAKE_SHORT = {
