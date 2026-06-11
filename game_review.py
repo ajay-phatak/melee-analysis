@@ -589,8 +589,11 @@ class LedgeTechTracker:
         self.ld_fall_n          = 0
         self.ld_waveland_sum    = 0      # land -> grounded-actionable
         self.ld_distance_sum    = 0.0    # inward distance from ledge at actionable
-        self._mode = "IDLE"
-        self._prev = None
+        self.events             = []     # (frame, option) per resolved engagement;
+                                         # also (frame, "hit_on_ledge") on aborts
+        self._mode  = "IDLE"
+        self._prev  = None
+        self._frame = 0
         self._reset_engagement()
 
     def _reset_engagement(self):
@@ -616,6 +619,7 @@ class LedgeTechTracker:
     def _resolve(self, opt):
         """Finish a (non-ledgedash) engagement and return to IDLE."""
         self.option_counts[opt] += 1
+        self.events.append((self._frame, opt))
         self.dwell_frames += self._release_dwell
         self.dwell_n      += 1
         self._mode = "IDLE"
@@ -663,6 +667,7 @@ class LedgeTechTracker:
         self._ld_distance = max(0.0, self.ledge_x - abs(curr.x))
         self.ledgedash_count += 1
         self.option_counts["ledgedash"] += 1
+        self.events.append((self._frame, "ledgedash"))
         self.ld_reaction_sum += self._release_dwell
         self.ld_waveland_sum += self._waveland_lag
         if self._dj_done:
@@ -680,11 +685,16 @@ class LedgeTechTracker:
         self._mode = "IDLE"
         self._reset_engagement()
 
-    def feed(self, curr):
+    def feed(self, frame_idx, curr):
         state = curr.state
+        self._frame = frame_idx
 
-        # Got hit / grabbed / knocked down / dead mid-engagement -> abandon it
+        # Got hit / grabbed / knocked down / dead mid-engagement -> abandon it.
+        # Getting hit out of a live engagement is the opponent covering the
+        # ledge — record it as its own event for coverage analysis.
         if state in POSTLAND_ABORT_STATES:
+            if self._mode != "IDLE" and state in GOT_HIT_STATES:
+                self.events.append((frame_idx, "hit_on_ledge"))
             self._mode = "IDLE"
             self._reset_engagement()
             self._prev = curr
@@ -928,6 +938,9 @@ class EdgeguardTracker:
         self._dj_used      = False  # double jump used while offstage
         self._recovery_y   = None   # Y when recovery action (airdodge/helpless) initiated
         self._prev_state   = None
+        self._challenged   = False  # edgeguarder did something (attack near edge,
+                                    # ledge hog, or actually hit the recoverer)
+        self._last_hit_move = None  # last move that connected during the recovery
 
     def _is_offstage(self, pf):
         if pf.state in CLIFF_STATES:
@@ -943,7 +956,7 @@ class EdgeguardTracker:
             and pf.stocks > 0
         )
 
-    def feed(self, frame_idx, curr, prev):
+    def feed(self, frame_idx, curr, prev, opp=None):
         offstage      = self._is_offstage(curr)
         prev_offstage = self._is_offstage(prev) if prev else False
 
@@ -955,7 +968,31 @@ class EdgeguardTracker:
                 self._dj_used    = False
                 self._recovery_y = None
                 self._prev_state = curr.state
+                self._challenged    = False
+                self._last_hit_move = None
+                # Already in knockback when crossing the ledge line: the
+                # launching move is the prospective finisher, so a clean
+                # bair KO out the side reads "bair", not "edgehog".
+                if (opp is not None
+                        and (_sv(curr.state) in DAMAGE_STATES
+                             or curr.state in DAMAGE_FLY_STATES)):
+                    self._last_hit_move = attack_name(opp.last_attack)
         else:
+            # Did the edgeguarder contest this recovery? Attacking near the
+            # edge, holding the ledge (hog), or landing an actual hit all
+            # count; an attack thrown mid-stage does not.
+            if opp is not None:
+                near_edge = abs(opp.x) > self.ledge_x - 25
+                if (opp.state in CLIFF_STATES
+                        or (near_edge and opp.state in ATTACK_STATES)):
+                    self._challenged = True
+            if prev is not None and curr.damage > prev.damage + 0.01:
+                self._challenged = True
+                if opp is not None:
+                    mv = attack_name(opp.last_attack)
+                    if mv:
+                        self._last_hit_move = mv
+
             if offstage:
                 # Detect double jump use while offstage
                 if self._prev_jumps is not None and curr.jumps < self._prev_jumps:
@@ -1004,9 +1041,11 @@ class EdgeguardTracker:
         else:
             category = "above"
         self.situations.append({
-            "frame":     self._start,
-            "category":  category,
-            "converted": converted,
+            "frame":      self._start,
+            "category":   category,
+            "converted":  converted,
+            "challenged": self._challenged,
+            "finish":     self._last_hit_move if converted else None,
         })
         self._active = False
 
@@ -1018,6 +1057,9 @@ class EdgeguardTracker:
         result = {
             "above": {"attempts": 0, "conversions": 0},
             "below": {"attempts": 0, "conversions": 0},
+            "challenged": 0,   # recoveries the edgeguarder contested at all
+            "free": 0,         # got back with zero contest (free recovery)
+            "finish_moves": {},  # what ended converted edgeguards (no hit = edgehog)
         }
         for s in self.situations:
             cat = s["category"]
@@ -1025,6 +1067,13 @@ class EdgeguardTracker:
                 result[cat]["attempts"] += 1
                 if s["converted"]:
                     result[cat]["conversions"] += 1
+            if s.get("challenged"):
+                result["challenged"] += 1
+            elif not s["converted"]:
+                result["free"] += 1
+            if s["converted"]:
+                mv = s.get("finish") or "edgehog"
+                result["finish_moves"][mv] = result["finish_moves"].get(mv, 0) + 1
         return result
 
 
@@ -1140,6 +1189,204 @@ class NeutralTracker:
             self.crouch_frames += 1
         if curr.state in SHIELD_STATES:
             self.shield_frames += 1
+
+
+# ---------------------------------------------------------------------------
+# 4a. Out-of-Shield Tracker  (response + speed after taking a hit on shield)
+# ---------------------------------------------------------------------------
+
+OOS_CATEGORIES = ("grab", "usmash", "jump", "shielddrop", "roll", "spotdodge",
+                  "drop", "grabbed", "hit", "other")
+_PASS_STATE = getattr(ActionState, "PASS", None)  # platform shield-drop
+
+
+class OOSTracker:
+    """What a player does after taking a hit on shield, and how fast.
+
+    A sample starts on each GUARD_SET_OFF (shieldstun) edge. Waiting is
+    counted from the end of shieldstun (the first actionable-ish frame) until
+    the player leaves the shield family, and the exit state names the
+    response:
+      grab / usmash / jump (incl. nair-OOS + wavedash-OOS starts) /
+      shielddrop (platform drop-through) / roll / spotdodge /
+      drop (released shield) / grabbed / hit (poked or grab beat the shield) /
+      other
+    """
+    TIMEOUT = 120  # give up and call it "drop" after this many waiting frames
+
+    def __init__(self):
+        self.samples    = 0   # shield hits taken
+        self.resolved   = 0
+        self.total_wait = 0   # post-stun frames spent holding shield before acting
+        self.cat_counts = {c: 0 for c in OOS_CATEGORIES}
+        self._mode = "IDLE"   # IDLE | STUN | WAIT
+        self._wait = 0
+        self._prev_state = None
+
+    @staticmethod
+    def _categorize(state):
+        if state in (ActionState.CATCH, ActionState.CATCH_DASH):
+            return "grab"
+        if state == ActionState.ATTACK_HI_4:
+            return "usmash"
+        if state == ActionState.KNEE_BEND:
+            return "jump"
+        if _PASS_STATE is not None and state == _PASS_STATE:
+            return "shielddrop"
+        if state in (ActionState.ESCAPE_F, ActionState.ESCAPE_B):
+            return "roll"
+        if state == ActionState.ESCAPE:
+            return "spotdodge"
+        if state in CAPTURE_STATES:
+            return "grabbed"
+        if state in GOT_HIT_STATES:
+            return "hit"
+        return "other"
+
+    def _resolve(self, category):
+        self.resolved   += 1
+        self.total_wait += self._wait
+        self.cat_counts[category] += 1
+        self._mode = "IDLE"
+        self._wait = 0
+
+    def feed(self, curr):
+        state = curr.state
+        prev  = self._prev_state
+        self._prev_state = state
+
+        if state == ActionState.GUARD_SET_OFF:
+            if prev != ActionState.GUARD_SET_OFF:
+                # new shield hit; if one was pending, its clock just restarts
+                self.samples += 1
+            self._mode = "STUN"
+            self._wait = 0
+            return
+
+        if self._mode == "IDLE":
+            return
+
+        if state in SHIELD_STATES and state != ActionState.GUARD_OFF:
+            self._mode = "WAIT"
+            self._wait += 1
+            if self._wait > self.TIMEOUT:
+                self._resolve("drop")
+            return
+
+        # left the shield family (or released it): name the response
+        self._resolve("drop" if state == ActionState.GUARD_OFF
+                      else self._categorize(state))
+
+    def summary(self):
+        return {
+            "samples":    self.samples,
+            "resolved":   self.resolved,
+            "total_wait": self.total_wait,
+            "categories": dict(self.cat_counts),
+        }
+
+
+# ---------------------------------------------------------------------------
+# 4b. Move Safety Tracker  (per-move outcome / punished-rate / spacing proxy)
+# ---------------------------------------------------------------------------
+
+MOVE_SAFETY_PUNISH_WINDOW = 45  # frames after starting a move in which getting
+                                # hit or grabbed counts as that move being punished
+
+
+class MoveSafetyTracker:
+    """Per-move usage + safety for one player's NORMALS (jab/tilts/smashes/
+    dash attack/aerials). Specials use char-specific action states and are
+    skipped, as in ATTACK_STATE_NAME_MAP.
+
+    Each use records:
+      outcome  - hit / shield (opponent took shieldstun) / whiff
+      punished - the player entered hit/grab states within
+                 MOVE_SAFETY_PUNISH_WINDOW frames of starting the move
+                 (split by the move's own outcome: a punished hit = they
+                 CC'd/traded, a punished shield = shield-grabbed, ...)
+      dist     - distance to the opponent at startup. A spacing proxy only
+                 (replays carry no hitbox data): compare where a move starts
+                 when it HITS vs when it gets PUNISHED instead of reading
+                 the absolute numbers.
+    """
+    def __init__(self):
+        self.moves = {}   # move name -> stat dict
+        self._cur  = None # latest use; doubles as the punish-attribution target
+        self._opp_prev_damage = None
+        self._opp_prev_state  = None
+
+    @staticmethod
+    def _blank():
+        return {"n": 0, "hit": 0, "shield": 0, "whiff": 0,
+                "punished_hit": 0, "punished_shield": 0, "punished_whiff": 0,
+                "dist_sum": 0.0, "hit_dist_sum": 0.0, "whiff_dist_sum": 0.0,
+                "punished_dist_sum": 0.0}
+
+    def _bank(self, c):
+        """Record the finished use's outcome counts + distance sums."""
+        s = self.moves.setdefault(c["move"], self._blank())
+        s[c["outcome"]] += 1
+        if c["outcome"] == "hit":
+            s["hit_dist_sum"] += c["dist"]
+        elif c["outcome"] == "whiff":
+            s["whiff_dist_sum"] += c["dist"]
+        c["open"] = False
+
+    def feed(self, frame_idx, curr, prev, opp):
+        prev_state = prev.state if prev else None
+        in_attack  = curr.state in ATTACK_STATES
+        was_attack = prev_state in ATTACK_STATES
+
+        # Resolve the in-progress use: upgrade its outcome while the move is
+        # out, bank it on the first frame after the attack state ends.
+        if self._cur is not None and self._cur["open"]:
+            c = self._cur
+            if in_attack:
+                if (opp is not None and self._opp_prev_damage is not None
+                        and opp.damage > self._opp_prev_damage + 0.01):
+                    c["outcome"] = "hit"   # hit beats shield
+                elif (c["outcome"] == "whiff" and opp is not None
+                        and opp.state == ActionState.GUARD_SET_OFF
+                        and self._opp_prev_state != ActionState.GUARD_SET_OFF):
+                    c["outcome"] = "shield"
+            else:
+                self._bank(c)
+
+        # Punished? Entering hit/grab states shortly after the move started.
+        # Runs after banking, so c["outcome"] is final when this fires.
+        if (self._cur is not None and not self._cur["punished"]
+                and not self._cur["open"]
+                and frame_idx - self._cur["start"] <= MOVE_SAFETY_PUNISH_WINDOW
+                and curr.state in GOT_HIT_STATES
+                and prev_state not in GOT_HIT_STATES):
+            c = self._cur
+            s = self.moves.setdefault(c["move"], self._blank())
+            s["punished_" + c["outcome"]] += 1
+            s["punished_dist_sum"] += c["dist"]
+            c["punished"] = True
+
+        # New use: transition into an attack state. A later use overwrites
+        # _cur, so a punish always attributes to the newest move.
+        if in_attack and not was_attack:
+            move = ATTACK_STATE_NAME_MAP.get(curr.state)
+            if move is not None:
+                dist = 0.0
+                if opp is not None:
+                    dist = ((curr.x - opp.x) ** 2 + (curr.y - opp.y) ** 2) ** 0.5
+                s = self.moves.setdefault(move, self._blank())
+                s["n"] += 1
+                s["dist_sum"] += dist
+                self._cur = {"move": move, "start": frame_idx, "dist": dist,
+                             "outcome": "whiff", "open": True, "punished": False}
+
+        if opp is not None:
+            self._opp_prev_damage = opp.damage
+            self._opp_prev_state  = opp.state
+
+    def finalize(self):
+        if self._cur is not None and self._cur["open"]:
+            self._bank(self._cur)
 
 
 # ---------------------------------------------------------------------------
@@ -1366,6 +1613,23 @@ class DeathTracker:
         return died
 
 
+LEDGE_COVERAGE_WINDOW = 75  # frames after a ledge option in which a punish
+                            # sequence opening counts as covering that option
+
+
+def _ledge_coverage(opp_ledge_events, my_seqs_on_opp):
+    """{option: {n, punished}} — for each of the opponent's ledge options, did
+    one of my punish sequences on them open within the follow-up window?"""
+    cov = {}
+    seq_frames = sorted(s["frame"] for s in my_seqs_on_opp)
+    for f, opt in opp_ledge_events:
+        slot = cov.setdefault(opt, {"n": 0, "punished": 0})
+        slot["n"] += 1
+        if any(f <= sf <= f + LEDGE_COVERAGE_WINDOW for sf in seq_frames):
+            slot["punished"] += 1
+    return cov
+
+
 # ---------------------------------------------------------------------------
 # Game Analyzer
 # ---------------------------------------------------------------------------
@@ -1390,6 +1654,8 @@ class GameAnalyzer:
         self.postland = {i: PostLandingTracker()                    for i in self.port_indices}
         self.stgctrl = {i: StageControlTracker(sd["center_x"])      for i in self.port_indices}
         self.neutral = {i: NeutralTracker()                         for i in self.port_indices}
+        self.oos     = {i: OOSTracker()                             for i in self.port_indices}
+        self.movesafety = {i: MoveSafetyTracker()                   for i in self.port_indices}
         self.deaths  = {i: DeathTracker()                           for i in self.port_indices}
         # punishes[i] = punishes received by player i
         self.punishes = {i: PunishTracker(sd["ledge_x"])            for i in self.port_indices}
@@ -1483,17 +1749,23 @@ class GameAnalyzer:
                     continue
 
                 self.tech[port_idx].feed(curr)
-                self.ledgetech[port_idx].feed(curr)
+                self.ledgetech[port_idx].feed(frame_idx, curr)
                 self.postland[port_idx].feed(curr)
                 self.stgctrl[port_idx].feed(curr)
                 self.neutral[port_idx].feed(curr)
+                self.oos[port_idx].feed(curr)
+                if opp_idx != port_idx:  # meaningless without a real opponent (FFA)
+                    self.movesafety[port_idx].feed(
+                        frame_idx, curr, prev, pfs.get(opp_idx))
                 self.punishes[port_idx].feed(
                     frame_idx, curr,
                     victim_hist=self.state_hist[port_idx],
                     attacker_hist=self.state_hist.get(opp_idx),
                     attacker_attack=(pfs[opp_idx].last_attack if opp_idx in pfs else None),
                 )
-                self.edgeguards[port_idx].feed(frame_idx, curr, prev)
+                self.edgeguards[port_idx].feed(
+                    frame_idx, curr, prev,
+                    opp=(pfs.get(opp_idx) if opp_idx != port_idx else None))
                 # push state AFTER trackers have consumed it so history lags current frame
                 self.state_hist[port_idx].push(curr.state)
 
@@ -1505,6 +1777,7 @@ class GameAnalyzer:
             last_pf = self._last_pf[port_idx]
             self.punishes[port_idx].finalize(last_frame, last_pf)
             self.edgeguards[port_idx].finalize()
+            self.movesafety[port_idx].finalize()
 
     def build_data(self):
         """Return structured dict of all analysis results."""
@@ -1592,6 +1865,15 @@ class GameAnalyzer:
                     "shield_frames":  n.shield_frames,
                     "shield_seconds": n.shield_frames / FPS,
                 },
+                "move_usage": {m: dict(s) for m, s in
+                               self.movesafety[port_idx].moves.items()},
+                "oos": self.oos[port_idx].summary(),
+                # Opponent's ledge options + whether I converted an opening
+                # within the follow-up window of each one (ledge coverage).
+                "ledge_coverage": _ledge_coverage(
+                    self.ledgetech[opponent[port_idx]].events,
+                    self.punishes[opponent[port_idx]].sequences,
+                ) if opponent[port_idx] != port_idx else {},
                 "punishes": {
                     "sequences":       seqs,
                     "count":           len(seqs),

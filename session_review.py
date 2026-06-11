@@ -275,6 +275,11 @@ def aggregate_stats(game_summaries):
     dealt_seqs = []   # my punishes (opener/ender = mine)
     recv_seqs  = []   # punishes on me (how I get opened, their kill moves)
     eg_above_att = eg_above_conv = eg_below_att = eg_below_conv = 0
+    eg_challenged = eg_free = 0
+    eg_finishers = {}     # what ends my converted edgeguards
+    oos_samples = oos_resolved = oos_wait = 0
+    oos_categories = {}
+    ledge_coverage = {}   # opponent ledge option -> {n, punished}
     sds = 0
     recov_att = recov_deaths = 0
     death_geo = {}    # my deaths by bucket
@@ -308,6 +313,23 @@ def aggregate_stats(game_summaries):
         eg_above_conv += p["edgeguard"]["above"]["conversions"]
         eg_below_att  += p["edgeguard"]["below"]["attempts"]
         eg_below_conv += p["edgeguard"]["below"]["conversions"]
+        eg_challenged += p["edgeguard"].get("challenged", 0)
+        eg_free       += p["edgeguard"].get("free", 0)
+        for m, c in (p["edgeguard"].get("finish_moves") or {}).items():
+            eg_finishers[m] = eg_finishers.get(m, 0) + c
+
+        oo = p.get("oos") or {}
+        oos_samples  += oo.get("samples", 0)
+        oos_resolved += oo.get("resolved", 0)
+        oos_wait     += oo.get("total_wait", 0)
+        for c, v in (oo.get("categories") or {}).items():
+            oos_categories[c] = oos_categories.get(c, 0) + v
+
+        for opt, s in (p.get("ledge_coverage") or {}).items():
+            slot = ledge_coverage.setdefault(opt, {"n": 0, "punished": 0})
+            slot["n"] += s.get("n", 0)
+            slot["punished"] += s.get("punished", 0)
+
         if p["won"]:
             wins += 1
 
@@ -354,6 +376,14 @@ def aggregate_stats(game_summaries):
         "categories": pl_categories,
         "by_aerial": pl_by_aerial,
     }
+
+    # Move-safety aggregation: sum each move's stat dict across games
+    move_usage = {}
+    for p in pdata:
+        for m, s in (p.get("move_usage") or {}).items():
+            slot = move_usage.setdefault(m, {})
+            for k, v in s.items():
+                slot[k] = slot.get(k, 0) + v
 
     # Ledge-tech aggregation (sum raw counts across games)
     def _lt_sum(key):
@@ -411,6 +441,8 @@ def aggregate_stats(game_summaries):
         # Reversal ledger + which of your own moves get punished
         "reversals":        _reversal_summary(recv_seqs),
         "punished_moves":   _punished_moves(recv_seqs),
+        # Per-move outcome/punished/spacing profile (normals only)
+        "move_usage":       move_usage,
         "death_geo":        death_geo,
         "kill_geo":         kill_geo,
         "recovery_att":     recov_att,
@@ -447,6 +479,16 @@ def aggregate_stats(game_summaries):
         "eg_above_conv":  eg_above_conv,
         "eg_below_att":   eg_below_att,
         "eg_below_conv":  eg_below_conv,
+        "eg_challenged":  eg_challenged,
+        "eg_free":        eg_free,
+        "eg_finishers":   eg_finishers,
+        "oos": {
+            "samples":    oos_samples,
+            "resolved":   oos_resolved,
+            "total_wait": oos_wait,
+            "categories": oos_categories,
+        },
+        "ledge_coverage": ledge_coverage,
     }
 
 
@@ -489,6 +531,27 @@ def _avg_kill_pct(kill_pcts):
     return round(sum(v["sum_pct"] for v in kill_pcts.values()) / n, 1) if n else None
 
 
+def _oos_punish_pct(oos):
+    """% of resolved shield-hit responses that were offensive options
+    (grab / usmash / jump-OOS / platform shield-drop)."""
+    res = oos.get("resolved", 0)
+    if not res:
+        return None
+    cats = oos.get("categories") or {}
+    off = sum(cats.get(c, 0) for c in ("grab", "usmash", "jump", "shielddrop"))
+    return round(100.0 * off / res, 1)
+
+
+def _whiff_metrics(move_usage):
+    """(whiff_pct, whiff_punished_pct) across all normals, or Nones."""
+    uses    = sum(s.get("n", 0) for s in move_usage.values())
+    whiffs  = sum(s.get("whiff", 0) for s in move_usage.values())
+    pun_wf  = sum(s.get("punished_whiff", 0) for s in move_usage.values())
+    whiff_pct = round(100.0 * whiffs / uses, 1) if uses else None
+    pun_pct   = round(100.0 * pun_wf / whiffs, 1) if whiffs else None
+    return whiff_pct, pun_pct
+
+
 def _set_record(set_games):
     """Flatten one matchup-set into a JSON-friendly record for the long-term coach.
     Reuses aggregate_stats (you) and aggregate_stats_opponent (neutral lost)."""
@@ -502,6 +565,7 @@ def _set_record(set_games):
     opp_st = aggregate_stats_opponent(set_games)
     lt = st["ledge_tech"]
     files = sorted(g.get("file", "") for g in set_games)
+    whiff_pct, whiff_punished_pct = _whiff_metrics(st["move_usage"])
 
     n_opened = len(st["dealt_seqs"])
     n_lost = len(opp_st["dealt_seqs"]) if opp_st else 0
@@ -543,6 +607,11 @@ def _set_record(set_games):
             "ledge_hang_invuln_pct": pct(lt["hang_invuln_frames"], lt["hang_frames"]),
             "avg_kill_pct": _avg_kill_pct(st["kill_pcts"]),
             "reversals_per_game": _r(st["reversals"]["n"] / st["games"], 2),
+            "whiff_pct": whiff_pct,
+            "whiff_punished_pct": whiff_punished_pct,
+            "oos_punish_pct": _oos_punish_pct(st["oos"]),
+            "free_recovery_given_pct": pct(
+                st["eg_free"], st["eg_above_att"] + st["eg_below_att"]),
         },
         # Matchup gameplan distributions — merged per-matchup over time by coach.py.
         "gameplan": {
@@ -567,6 +636,16 @@ def _set_record(set_games):
             "their_kill_pcts":  st["their_kill_pcts"],
             "reversals":        st["reversals"],
             "punished_moves":   st["punished_moves"],
+            "move_usage":       st["move_usage"],
+            "oos_samples":      st["oos"]["samples"],
+            "oos_resolved":     st["oos"]["resolved"],
+            "oos_wait":         st["oos"]["total_wait"],
+            "oos_categories":   st["oos"]["categories"],
+            "eg_challenged":    st["eg_challenged"],
+            "eg_free":          st["eg_free"],
+            "eg_att":           st["eg_above_att"] + st["eg_below_att"],
+            "eg_finishers":     st["eg_finishers"],
+            "ledge_coverage":   st["ledge_coverage"],
         },
     }
 
@@ -595,7 +674,12 @@ def pro_replays_dir(my_char, opp_char):
 # v3: punish tracker now captures throws + tech-chases (dthrow strings).
 # v4: start/end percent + per-hit move log on punishes; loser_move/reversal_kind.
 # v5: hit_moves also logs mid-hitstun hits (true combos) via the damage-rise edge.
-PRO_CACHE_VERSION = 5
+# v6: move_usage (per-move outcome / punished-rate / startup-distance profile).
+# v7: oos (out-of-shield response), edgeguard challenged/free/finish_moves,
+#     ledge_coverage (opponent ledge options vs my punish openings).
+# v8: edgeguard finisher seeds from the launching move (edgehog was inflated
+#     by knockback KOs whose killing blow landed before the ledge line).
+PRO_CACHE_VERSION = 8
 PRO_CACHE_FILENAME = ".pro_cache.pkl"
 
 
@@ -711,6 +795,11 @@ def write_stats_block(stats, out, indent="    "):
     if _def > 0:
         _sh = 100.0 * stats['avg_shield_s'] / _def
         out(f"{indent}Shield vs crouch  : {_sh:.0f}% shield / {100 - _sh:.0f}% crouch  (of defensive time)")
+    oo = stats.get("oos") or {}
+    if oo.get("resolved"):
+        avg_w = oo["total_wait"] / oo["resolved"]
+        out(f"{indent}OOS response      : {oo['samples']} shield hits · avg {avg_w:.1f}f to act · "
+            f"{_fmt_pct_dist(oo['categories'], top=5)}")
     out(f"{indent}Center stage      : {stats['avg_center_pct']:.1f}%{flag(stats['avg_center_pct'], 40, 60)}")
     out(f"{indent}Aerials           : {stats['high_aerials']} high / {stats['low_aerials']} low (L-cancel window)")
     out(f"{indent}L-cancel rate     : {lc_s}{flag(stats['lc_rate'])}")
@@ -778,12 +867,45 @@ def write_stats_block(stats, out, indent="    "):
             bavg = b["total_wait_frames"] / bs
             cats_str = _format_postland_categories(b["categories"], bs)
             out(f"{indent}  {a:5s} ({bs:4d}) avg {bavg:4.1f}f  {cats_str}")
+    # Move safety: per-move outcome / punished / spacing profile
+    mu = stats.get("move_usage") or {}
+    mu_shown = [(m, s) for m, s in sorted(mu.items(), key=lambda kv: -kv[1]["n"])
+                if s["n"] >= 5][:6]
+    if mu_shown:
+        out(f"{indent}Move safety       : uses · hit/shield/whiff · punished wf,sh · dist hit→pun")
+        for m, s in mu_shown:
+            n = s["n"]
+            hp, sp, wp = 100*s["hit"]/n, 100*s["shield"]/n, 100*s["whiff"]/n
+            pwf = 100*s["punished_whiff"]/s["whiff"] if s["whiff"] else 0.0
+            psh = 100*s["punished_shield"]/s["shield"] if s["shield"] else 0.0
+            n_pun = s["punished_whiff"] + s["punished_shield"] + s["punished_hit"]
+            dh = s["hit_dist_sum"]/s["hit"] if s["hit"] else 0.0
+            dp = s["punished_dist_sum"]/n_pun if n_pun else 0.0
+            dist_str = (f"{dh:4.1f}→{dp:.1f}" if n_pun and s["hit"] else
+                        f"{dh:4.1f}→ —" if s["hit"] else "  — ")
+            out(f"{indent}  {m:<11}     : {n:3d} · {hp:3.0f}/{sp:2.0f}/{wp:2.0f}% · "
+                f"{pwf:3.0f}%,{psh:3.0f}% · {dist_str}")
     out(f"{indent}Avg punish dealt  : {stats['avg_punish']:.1f}%  ({len(stats['dealt_seqs'])} sequences)")
     if stats["dealt_seqs"]:
         total = len(stats["dealt_seqs"])
         out(f"{indent}Punish outcomes   : {stats['kills']} kills / {stats['edgeguards']} edgeguards / {stats['resets']} resets  ({100*stats['kills']//total}% kill rate)")
     out(f"{indent}Edgeguard (above) : {rate_str(stats['eg_above_conv'], stats['eg_above_att'])}")
     out(f"{indent}Edgeguard (below) : {rate_str(stats['eg_below_conv'], stats['eg_below_att'])}")
+    eg_att_total = stats["eg_above_att"] + stats["eg_below_att"]
+    if eg_att_total:
+        free = stats.get("eg_free", 0)
+        out(f"{indent}Free recoveries   : {free}/{eg_att_total} given "
+            f"({100.0*free/eg_att_total:.0f}% uncontested)")
+    if stats.get("eg_finishers"):
+        fin = sorted(stats["eg_finishers"].items(), key=lambda kv: -kv[1])[:5]
+        out(f"{indent}EG finishers      : " + " · ".join(f"{m} x{c}" for m, c in fin))
+    lc = stats.get("ledge_coverage") or {}
+    lc_shown = sorted((kv for kv in lc.items() if kv[1]["n"] > 0),
+                      key=lambda kv: -kv[1]["n"])[:6]
+    if lc_shown:
+        out(f"{indent}Ledge coverage    : " + " · ".join(
+            f"{opt} {s['punished']}/{s['n']}" for opt, s in lc_shown)
+            + "  (their option, punished/total)")
     _write_gameplan_block(stats, out, indent)
 
 

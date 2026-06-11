@@ -44,6 +44,10 @@ METRICS = {
     "punish_pct":          ("Avg punish %",         True,  0.7, "{:.1f}%"),
     "avg_kill_pct":        ("Avg kill %",           False, 4.0, "{:.0f}%"),
     "reversals_per_game":  ("Reversals/game",       False, 0.3, "{:.2f}"),
+    "whiff_pct":           ("Whiff rate",           False, 2.0, "{:.0f}%"),
+    "whiff_punished_pct":  ("Whiffs punished",      False, 3.0, "{:.0f}%"),
+    "oos_punish_pct":      ("OOS punish %",         True,  3.0, "{:.0f}%"),
+    "free_recovery_given_pct": ("Free recoveries given", False, 4.0, "{:.0f}%"),
     "edgeguard_below_pct": ("Edgeguard below %",    True,  3.0, "{:.0f}%"),
     "wavedash_pct":        ("Wavedash %",           True,  2.0, "{:.0f}%"),
     "f1_pct":              ("Frame-1 aerial %",     True,  2.0, "{:.0f}%"),
@@ -216,9 +220,12 @@ def _merge_gameplan(recs):
                          "your_kill_moves", "their_kill_moves",
                          "death_geo", "kill_geo",
                          "string_by_pct", "followups",
-                         "kill_pcts", "their_kill_pcts", "punished_moves")}
+                         "kill_pcts", "their_kill_pcts", "punished_moves",
+                         "move_usage", "oos_categories", "eg_finishers",
+                         "ledge_coverage")}
     rv = {"n": 0, "stocks": 0, "dmg_sum": 0.0, "pct_sum": 0.0,
           "kinds": {}, "moves": {}}
+    oos_s = oos_r = oos_w = eg_ch = eg_fr = eg_at = 0
     recov_att = recov_deaths = nf = na = 0
     dfn = dfd = dan = dad = cwn = cwd = cln = cld = 0.0
     for r in recs:
@@ -235,6 +242,16 @@ def _merge_gameplan(recs):
         _merge_nested(g["kill_pcts"], gp.get("kill_pcts"))
         _merge_nested(g["their_kill_pcts"], gp.get("their_kill_pcts"))
         _merge_counts(g["punished_moves"], gp.get("punished_moves"))
+        _merge_nested(g["move_usage"], gp.get("move_usage"))
+        _merge_counts(g["oos_categories"], gp.get("oos_categories"))
+        _merge_counts(g["eg_finishers"], gp.get("eg_finishers"))
+        _merge_nested(g["ledge_coverage"], gp.get("ledge_coverage"))
+        oos_s  += gp.get("oos_samples", 0)
+        oos_r  += gp.get("oos_resolved", 0)
+        oos_w  += gp.get("oos_wait", 0)
+        eg_ch  += gp.get("eg_challenged", 0)
+        eg_fr  += gp.get("eg_free", 0)
+        eg_at  += gp.get("eg_att", 0)
         r_rv = gp.get("reversals") or {}
         rv["n"]       += r_rv.get("n", 0)
         rv["stocks"]  += r_rv.get("stocks", 0)
@@ -256,6 +273,8 @@ def _merge_gameplan(recs):
         if gp.get("center_loss") is not None:
             cln += gp["center_loss"] * ng; cld += ng
     g["reversals"] = rv
+    g["oos_samples"], g["oos_resolved"], g["oos_wait"] = oos_s, oos_r, oos_w
+    g["eg_challenged"], g["eg_free"], g["eg_att"] = eg_ch, eg_fr, eg_at
     g["recovery_att"], g["recovery_deaths"] = recov_att, recov_deaths
     g["neutral_for"], g["neutral_against"] = nf, na
     g["dmg_per_opening_for"]     = round(dfn / dfd, 1) if dfd else None
@@ -415,6 +434,24 @@ def render_trends(tr):
             a(f"    Reversed    : {line}")
         if gp.get("punished_moves"):
             a(f"    Punished on : {_fmt_dist(gp['punished_moves'])}")
+        if gp.get("move_usage"):
+            a(f"    Move safety : {_fmt_move_safety(gp['move_usage'])}")
+        if gp.get("oos_resolved"):
+            avg_w = gp.get("oos_wait", 0) / gp["oos_resolved"]
+            a(f"    OOS         : {gp.get('oos_samples', 0)} shield hits · "
+              f"avg {avg_w:.1f}f · {_fmt_dist(gp.get('oos_categories') or {}, top=4)}")
+        if gp.get("eg_att"):
+            line = (f"free {round(100*gp.get('eg_free', 0)/gp['eg_att'])}% "
+                    f"({gp.get('eg_free', 0)}/{gp['eg_att']})")
+            if gp.get("eg_finishers"):
+                line += f" · finish {_fmt_dist(gp['eg_finishers'], top=3)}"
+            a(f"    EG detail   : {line}")
+        lc = gp.get("ledge_coverage") or {}
+        lc_shown = sorted((kv for kv in lc.items() if kv[1].get("n")),
+                          key=lambda kv: -kv[1]["n"])[:5]
+        if lc_shown:
+            a("    Ledge cover : " + " · ".join(
+                f"{opt} {s.get('punished', 0)}/{s['n']}" for opt, s in lc_shown))
         if gp.get("death_geo"):
             a(f"    You die     : {_fmt_dist(gp['death_geo'])}")
         if gp.get("kill_geo"):
@@ -466,6 +503,18 @@ def _fmt_kill_pcts(d, top=3):
     items = sorted(d.items(), key=lambda kv: -kv[1].get("n", 0))[:top]
     moves = " · ".join(f"{m} {v['sum_pct']/v['n']:.0f} x{v['n']}" for m, v in items)
     return f"avg {avg:.0f}% ({moves})"
+
+
+def _fmt_move_safety(mu, top=4):
+    """'move Nu wfNN% punNN% · ...' — usage, whiff rate, punished-whiff rate."""
+    items = [(m, s) for m, s in sorted(mu.items(), key=lambda kv: -kv[1].get("n", 0))
+             if s.get("n")][:top]
+    parts = []
+    for m, s in items:
+        wf = 100.0 * s.get("whiff", 0) / s["n"]
+        pwf = (100.0 * s.get("punished_whiff", 0) / s["whiff"]) if s.get("whiff") else 0.0
+        parts.append(f"{m} {s['n']}u wf{wf:.0f}% pun{pwf:.0f}%")
+    return " · ".join(parts) or "—"
 
 
 def _top_followups(fu, n_openers=2, n_moves=3):
