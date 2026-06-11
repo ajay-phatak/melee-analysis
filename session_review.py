@@ -594,7 +594,8 @@ def pro_replays_dir(my_char, opp_char):
 # v2: added sd_count, death_buckets, recovery, opener_move/ender_move on punishes.
 # v3: punish tracker now captures throws + tech-chases (dthrow strings).
 # v4: start/end percent + per-hit move log on punishes; loser_move/reversal_kind.
-PRO_CACHE_VERSION = 4
+# v5: hit_moves also logs mid-hitstun hits (true combos) via the damage-rise edge.
+PRO_CACHE_VERSION = 5
 PRO_CACHE_FILENAME = ".pro_cache.pkl"
 
 
@@ -674,7 +675,13 @@ def load_pro_stats(my_char, opp_char, stages=None):
         return None, 0
 
     all_games = _load_pro_games(pro_dir, my_char, slp_files)
-    game_summaries = [g for g in all_games if not stages or g.get("stage") in stages]
+    # Pro datasets occasionally contain doubles replays; non-1v1 games map each
+    # port's "opponent" to itself, fabricating punish/move attribution — drop them.
+    game_summaries = [
+        g for g in all_games
+        if len(g.get("port_order", [])) == 2
+        and (not stages or g.get("stage") in stages)
+    ]
 
     if not game_summaries:
         return None, len(slp_files)

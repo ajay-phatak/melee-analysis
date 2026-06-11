@@ -1257,6 +1257,18 @@ class PunishTracker:
             elif not self._last_in_hit:
                 self._hits += 1
                 self._hit_log.append([move, round(victim.damage, 1)])
+            elif victim.damage > self._peak_pct + 0.01:
+                # New hit while the victim is STILL in hitstun (a true combo):
+                # in_hit never drops, but percent only rises on a fresh hit.
+                # Only log when the move name CHANGES — a repeat name during
+                # continuous hitstun is multi-part damage of ONE move (a
+                # throw's hit+release components, drill/needle ticks), since a
+                # real same-move re-hit passes through a hitstun exit and is
+                # caught by the re-entry branch above. Feeds hit_moves only —
+                # legacy `hits` stays a re-entry count so the 1-hit-poke
+                # exclusion is unchanged.
+                if move is not None and self._hit_log and move != self._hit_log[-1][0]:
+                    self._hit_log.append([move, round(victim.damage, 1)])
             if move is not None:
                 self._ender_move = move
                 if self._hit_log:
