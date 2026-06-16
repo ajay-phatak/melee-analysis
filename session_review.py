@@ -679,7 +679,12 @@ def pro_replays_dir(my_char, opp_char):
 #     ledge_coverage (opponent ledge options vs my punish openings).
 # v8: edgeguard finisher seeds from the launching move (edgehog was inflated
 #     by knockback KOs whose killing blow landed before the ledge line).
-PRO_CACHE_VERSION = 8
+# v9: deaths read at Dead-action-state entry instead of the stock decrement —
+#     credits top/uair punish-kills (were closing as resets), derives kill
+#     geography from the death state (DeadUp*->top, DeadLeft/Right->side,
+#     DeadDown->edgehog), and re-grounds SD detection on the edgeguard tracker's
+#     per-trip context (top star-KOs no longer mislabeled as self-destructs).
+PRO_CACHE_VERSION = 9
 PRO_CACHE_FILENAME = ".pro_cache.pkl"
 
 
