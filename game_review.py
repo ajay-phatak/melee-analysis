@@ -165,6 +165,18 @@ KNOCKDOWN_TECH_STATES = DOWN_STATES | {
 # something to them). Used to tell a real opponent kill from a self-destruct.
 GOT_HIT_STATES = (set(DAMAGE_STATES) | DAMAGE_FLY_STATES
                   | CAPTURE_STATES | THROWN_STATES | DOWN_STATES)
+# Death action-states. The state the victim is in when they die names the KO
+# direction directly (stage-independent):
+#   0    DeadDown                              -> off the bottom
+#   1/2  DeadLeft / DeadRight                  -> off the side
+#   3-10 DeadUp / DeadUpStar(Ice) / DeadUpFall*-> off the top (star / screen KO)
+# Death is detected on ENTRY to one of these, NOT on the stock-count decrement:
+# the stock only ticks down after the death animation finishes (a top star-KO
+# lingers ~40-60 frames), by which point the victim's position no longer reflects
+# the KO and the punish/recovery that caused it has already closed.
+DEAD_STATES        = set(range(0, 11))
+DEAD_SIDE_STATES   = {1, 2}
+DEAD_BOTTOM_STATES = {0}
 # All grounded and aerial attack states
 ATTACK_STATES = frozenset({
     ActionState.ATTACK_11, ActionState.ATTACK_12, ActionState.ATTACK_13,
@@ -1677,39 +1689,53 @@ class GameAnalyzer:
         self._prev = {i: None for i in self.port_indices}
         self._last_pf = {i: None for i in self.port_indices}
 
-    def _is_self_destruct(self, port_idx, opp_idx, was_recovering):
-        """A death is a self-destruct only if the opponent did nothing to cause
-        it: not while recovering (rules out edgeguards / edgehogs), no recent
-        hitstun, and the opponent wasn't ledge-hanging or attacking."""
-        if was_recovering:
-            return False
+    def _is_self_destruct(self, port_idx, opp_idx):
+        """A self-destruct = the opponent did nothing to cause the death: no
+        recent knockback/grab, and the opponent wasn't edgeguarding (ledge-hang
+        or a hitbox near the edge). Evaluated at death-state ENTRY, so the
+        lookback covers the real pre-death frames.
+
+        Being offstage ("recovering") is NOT itself a disqualifier — most SDs
+        happen while offstage. The old `was_recovering` guard worked when death
+        was read at the stock decrement, but at dead-entry the dying player is
+        still flagged as recovering, so it suppressed every genuine SD. Instead a
+        gimp is excluded by three checks: recent knockback, the opponent actively
+        edgeguarding, and the recovery tracker's own context (whether THIS
+        offstage trip was challenged or began from a knockback)."""
         vh = self.state_hist[port_idx]
-        if vh.had_state_in_last(GOT_HIT_STATES, 60):
+        if vh.had_state_in_last(GOT_HIT_STATES, 90):   # knocked / grabbed into it
             return False
         oh = self.state_hist.get(opp_idx)
         if oh is not None and (oh.had_state_in_last(CLIFF_STATES, 40)
                                or oh.had_state_in_last(ATTACK_STATES, 30)):
             return False
+        # The recovery tracker knows whether this specific offstage trip was the
+        # opponent's doing: a hit that knocked you off (`_last_hit_move`) or any
+        # contest while out there (`_challenged`). Either => gimp, not an SD.
+        eg = self.edgeguards.get(port_idx)
+        if eg is not None and eg._active and (eg._challenged or eg._last_hit_move is not None):
+            return False
         return True
 
-    def _death_bucket(self, prev_pf, is_sd, hit_recent):
-        """Coarse death geography (approximate, no exact blast zones):
+    def _classify_death(self, dead_state, is_sd, hit_recent):
+        """Death geography from the victim's death action-state — the game names
+        the KO direction directly, so no blast-zone coords or position heuristics:
           sd      - self-destruct (no opponent involvement)
-          top     - knockback KO out the top
-          side    - knockback KO out the side
-          edgehog - died offstage WITHOUT recent knockback (opponent edgeguarded
-                    you: ledge-hog, walled-out / missed recovery, low spike)
+          top     - DeadUp* (3-10): launched out the top (star / screen KO)
+          side    - DeadLeft/Right (1/2): launched out the side
+          edgehog - DeadDown (0), or any death WITHOUT recent knockback (gimp,
+                    ledge-hog, walled-out / missed recovery, low spike)
         `hit_recent` = victim was in knockback/hitstun just before dying."""
         if is_sd:
             return "sd"
-        if not hit_recent or prev_pf is None:
+        if not hit_recent:
             return "edgehog"
-        x, y = abs(prev_pf.x), prev_pf.y
-        if y >= 100:
-            return "top"
-        if y <= -50:
-            return "edgehog"   # spiked / meteor'd low → offstage death
-        return "side"
+        s = _sv(dead_state)
+        if s in DEAD_SIDE_STATES:
+            return "side"
+        if s in DEAD_BOTTOM_STATES:
+            return "edgehog"   # off the bottom = spike / gimp / edge situation
+        return "top"           # DeadUp* (3-10)
 
     def run(self):
         frames = self.game.frames
@@ -1728,18 +1754,23 @@ class GameAnalyzer:
                 prev = self._prev[port_idx]
                 opp_idx = self.opponent.get(port_idx, port_idx)
 
-                # Death detection (drives edgeguard + punish death notifications)
-                died = self.deaths[port_idx].feed(frame_idx, curr)
-                if died:
-                    # Capture recovery state BEFORE notify_death() closes it.
-                    was_recovering = self.edgeguards[port_idx]._active
-                    is_sd = self._is_self_destruct(port_idx, opp_idx, was_recovering)
+                # Per-stock damage bookkeeping still keys off the stock count.
+                self.deaths[port_idx].feed(frame_idx, curr)
+                # Death geography / kill credit is handled on ENTRY to a Dead
+                # action-state (see DEAD_STATES). At that frame the launch is the
+                # previous frame, so the punish is still live (correct kill
+                # credit), the self-destruct lookback sees the real hit, and the
+                # death state names the blast zone (correct top/side geography).
+                entered_dead = (_sv(curr.state) in DEAD_STATES
+                                and (prev is None or _sv(prev.state) not in DEAD_STATES))
+                if entered_dead:
+                    is_sd = self._is_self_destruct(port_idx, opp_idx)
                     if is_sd:
                         self.sd_counts[port_idx] += 1
                     hit_recent = self.state_hist[port_idx].had_state_in_last(
-                        DAMAGE_FLY_STATES | set(DAMAGE_STATES), 12)
+                        DAMAGE_FLY_STATES | set(DAMAGE_STATES), 15)
                     self.death_buckets[port_idx].append(
-                        self._death_bucket(prev, is_sd, hit_recent))
+                        self._classify_death(curr.state, is_sd, hit_recent))
                     self.edgeguards[port_idx].notify_death()
                     self.punishes[port_idx].notify_death(frame_idx)
 
