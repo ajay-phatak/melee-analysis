@@ -552,6 +552,124 @@ def _whiff_metrics(move_usage):
     return whiff_pct, pun_pct
 
 
+# --- Notable moments (savestate export / clip lookup) -----------------------
+# Every frame recorded elsewhere in the engine is a 0-based index into
+# py-slippi's frame array, whose first entry is Melee frame -123. Dolphin (and
+# the savestate exporter) speak native Melee frame numbers, so event frames get
+# shifted by that fixed offset before they leave the engine.
+MELEE_FRAME_START = -123
+MOMENT_LEAD_IN     = 240  # ~4s of runway before the event, for every kind
+MOMENT_TAIL_DEATH  = 60
+MOMENT_TAIL_MISSED_EG = 480
+MOMENT_TAIL_PUNISH = 600
+BEST_PUNISH_TOP_N = 3
+
+# Savestate windows, for exporting a moment into Training Mode instead of just
+# watching it. Deliberately not the clip window above: a clip wants a lead-in so
+# you can see the situation build, but a savestate drops you straight *into* it,
+# where a four-second lead-in is four seconds of re-performing your own inputs
+# before the part you actually want to practice.
+#   kind -> (frames before the event to start at, savestate length)
+SAVE_WINDOWS = {
+    # A state at the moment of death is useless — back up to before the punish.
+    "death":            (300, 360),
+    # edgeguard_trips[].frame is already the frame they crossed the ledge line,
+    # i.e. exactly the situation you want to redo.
+    "missed_edgeguard": (0, 600),
+    # Start on the opening hit.
+    "best_punish":      (0, 600),
+}
+
+
+def _melee_frame(engine_frame):
+    """Convert an engine frame (py-slippi array index) to native Melee numbering."""
+    return engine_frame + MELEE_FRAME_START
+
+
+def _human_port(game):
+    """Which of the two used ports the player is on, as "low"/"high". That's how
+    the savestate exporter names ports, and it decides who you get to control."""
+    my_port = game.get("my_port")
+    opp = [p for p in game.get("port_order", []) if p != my_port]
+    return "low" if not opp or my_port < opp[0] else "high"
+
+
+def _moment(kind, game, game_index, engine_frame, tail, label):
+    """One notable-moment entry. start/end_frame bracket the event with a fixed
+    lead-in and a kind-specific tail (for watching it), clamped to Melee's
+    earliest frame; save_frame/save_frames carry the (different) savestate
+    window — see SAVE_WINDOWS."""
+    frame = _melee_frame(engine_frame)
+    save_lead, save_frames = SAVE_WINDOWS[kind]
+    return {
+        "kind":        kind,
+        "path":        game.get("path") or game.get("file", ""),
+        "file":        game.get("file", ""),
+        "game_index":  game_index,
+        "frame":       frame,
+        "start_frame": max(MELEE_FRAME_START, frame - MOMENT_LEAD_IN),
+        "end_frame":   frame + tail,
+        "label":       label,
+        "human_port":  _human_port(game),
+        "save_frame":  max(MELEE_FRAME_START, frame - save_lead),
+        "save_frames": save_frames,
+    }
+
+
+def _set_moments(set_games):
+    """Notable per-set events for Training Mode savestate export (see
+    export_savestates.py): deaths, missed edgeguards, and the set's best
+    punishes. Additive/read-only w.r.t. the rest of the record — this never
+    feeds session.txt.
+    """
+    moments = []
+    all_punishes = []  # (damage, game_index, seq) across the whole set
+
+    for game_index, g in enumerate(set_games, 1):
+        my_port = g.get("my_port")
+        if my_port not in g["ports"]:
+            continue
+        p = g["ports"][my_port]
+
+        for d in p.get("deaths", []):
+            moments.append(_moment(
+                "death", g, game_index, d["frame"], MOMENT_TAIL_DEATH,
+                f"Died (took {d['dmg_taken']:.0f}%)",
+            ))
+
+        # ports[me]["edgeguard_trips"] = the opponent's recovery situations,
+        # i.e. my edgeguard opportunities (game_review binds this to the
+        # OPPONENT's tracker). "Missed" = I contested but they still got back
+        # (free recoveries are a different habit). guard_ready drops scrambles
+        # where I was launched offstage too: still a real recovery for them,
+        # but as a savestate it just drops you in mid-knockback.
+        for t in p.get("edgeguard_trips", []):
+            if t.get("challenged") and not t.get("converted") and t.get("guard_ready", True):
+                moments.append(_moment(
+                    "missed_edgeguard", g, game_index, t["frame"],
+                    MOMENT_TAIL_MISSED_EG,
+                    f"Missed edgeguard ({t['category']})",
+                ))
+
+        opp_ports = [pi for pi in g["port_order"] if pi != my_port]
+        opp_port = opp_ports[0] if opp_ports else None
+        if opp_port is not None and opp_port in g["ports"]:
+            for s in g["ports"][opp_port]["punishes"]["sequences"]:
+                all_punishes.append((s.get("damage", 0.0), game_index, s))
+
+    all_punishes.sort(key=lambda t: t[0], reverse=True)
+    for damage, game_index, s in all_punishes[:BEST_PUNISH_TOP_N]:
+        g = set_games[game_index - 1]
+        outcome = s.get("outcome", "reset")
+        moments.append(_moment(
+            "best_punish", g, game_index, s["frame"], MOMENT_TAIL_PUNISH,
+            f"{damage:.0f}% punish → {outcome}",
+        ))
+
+    moments.sort(key=lambda m: (m["game_index"], m["frame"]))
+    return moments
+
+
 def _set_record(set_games):
     """Flatten one matchup-set into a JSON-friendly record for the long-term coach.
     Reuses aggregate_stats (you) and aggregate_stats_opponent (neutral lost)."""
@@ -647,6 +765,9 @@ def _set_record(set_games):
             "eg_finishers":     st["eg_finishers"],
             "ledge_coverage":   st["ledge_coverage"],
         },
+        # Notable moments for savestate export — additive, never read by the
+        # human report or by coach.py.
+        "moments": _set_moments(set_games),
     }
 
 
@@ -684,7 +805,13 @@ def pro_replays_dir(my_char, opp_char):
 #     geography from the death state (DeadUp*->top, DeadLeft/Right->side,
 #     DeadDown->edgehog), and re-grounds SD detection on the edgeguard tracker's
 #     per-trip context (top star-KOs no longer mislabeled as self-destructs).
-PRO_CACHE_VERSION = 9
+# v10: edgeguard_trips (raw per-trip recovery situations behind the edgeguard
+#     summary, with frames — feeds the notable-moments list).
+# v11: edgeguard_trips carry guard_ready (was the edgeguarder actionable when
+#     the trip began) — filters scrambles out of the missed-edgeguard list.
+# Both are additive raw data that no metric reads, so an old cache would still
+# aggregate correctly; the numbers match nojohns' engine, which shares this code.
+PRO_CACHE_VERSION = 11
 PRO_CACHE_FILENAME = ".pro_cache.pkl"
 
 
@@ -1178,6 +1305,7 @@ def session_report(folder, my_code, count=None, sets=None, singles_only=False,
             continue
 
         game_data["file"] = os.path.basename(path)
+        game_data["path"] = os.path.abspath(path)
         game_data["my_port"] = port
 
         # For tournament files (no netplay codes), patch opponent code from filename

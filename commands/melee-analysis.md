@@ -37,7 +37,21 @@ python coach.py trends --history "path/to/history.json" --out trends.txt
 
 5. **Surface gaps & collect your fixes — do this in chat BEFORE writing any notes.** Walk the same gaps the analysis found, grouped by matchup (neutral / conversion / stocks / positioning) plus the cross-cutting tech gaps. For each gap: state the gap with its numbers, offer **one tentative fix** marked as such (e.g. *"tentative — your call: …"*), then ask how you want to address it. The tentative is a prompt to react to, **not** a recommendation — keep it short, fast/aggressive (see coaching style), and never offer "play slower." Record your own wording as the fix. Anything you skip or leave undecided becomes `fix: open`. Don't overwhelm: batch the gaps so you can answer in one pass (e.g. a numbered list per matchup), and don't invent extra advice beyond the single tentative. **The fixes gathered here are what get written into the notes below.**
 
-6. **(Optional) Update Obsidian** via the `obsidian-mcp-connector` MCP server (vault-relative paths under `Melee Coach/`; skip this whole step if you don't use Obsidian — history + trends still work). Create the folder/notes if missing; for existing notes, read first and update in place (don't duplicate). Match your terse, bulleted note style.
+6. **Missed edgeguards → practice reps (offer, don't push).** The session's notable moments live in `session.json`; every missed edgeguard can be exported as a [Training Mode - Community Edition](https://github.com/UnclePunch/Training-Mode) savestate that drops you straight into the situation with your opponent's real recovery replaying. When edgeguard conversion is one of the gaps in step 5, list them and offer the reps:
+```
+python export_savestates.py list --json session.json
+```
+   - Present the list in chat (game, timestamp, above/below) as *the specific situations* behind the edgeguard number — it makes the gap concrete, and you pick which ones are worth drilling.
+   - Export the ones you pick (indices from `list`; omit `--pick` for all):
+```
+python export_savestates.py export --json session.json --pick 1,3,4
+```
+   - `.gci` files land in Dolphin's Card A folder (auto-detected, or pass `--out-dir`); load them from Training Mode - Community Edition. That Dolphin's Slot A must be set to **GCI Folder**. Needs the exporter built once: `cd savestate && cargo build --release`.
+   - `--kind all` also covers deaths (state starts ~5s before the death, so the whole punish is replayable) and the set's best punishes. Default is missed edgeguards only.
+   - Some moments legitimately can't be exported (`no restorable game state near this frame`, replays older than the slp version Training Mode supports) — report the skips, don't retry them.
+   - If a savestate export becomes your fix for a gap, record it as such in step 7's notes (e.g. `fix: drilled the 3 below-ledge misses in TM`).
+
+7. **(Optional) Update Obsidian** via the `obsidian-mcp-connector` MCP server (vault-relative paths under `Melee Coach/`; skip this whole step if you don't use Obsidian — history + trends still work). Create the folder/notes if missing; for existing notes, read first and update in place (don't duplicate). Match your terse, bulleted note style.
    - **Fixes come from you, not the model.** Throughout the blocks below, wherever the guidance says "the fix is X" / "prescribe Y" / "name the cover" / "flowchart fix", that names the *lever* to offer as a tentative in step 5 — the line written into the note is your chosen fix from step 5, or `fix: open` if unresolved. Write gap lines as `<gap> → fix: <your fix>` (or `→ fix: open`) so the notes stay scannable and open items are greppable. Keep the detected gap text exactly as before; only the prescription changes hands.
    - **`Melee Coach/Sessions/YYYY-MM-DD.md`** — one note per session. YAML frontmatter (`date`, `type: melee-session`, `matchups`, `record`); then a section per matchup-set with headline metrics, terse findings, and a "vs your trend" line. Overwrite if it already exists for that date.
    - **`Melee Coach/Matchups/<my_char> vs <opp_char>.md`** — one per matchup played. These are **neutral gameplans / flowcharts, NOT tech-skill reports** (tech lives in `Progress.md`). Use the per-matchup blocks from `trends.txt` (running aggregate) + this session's lines from `session.txt`. Structure:
@@ -48,7 +62,7 @@ python coach.py trends --history "path/to/history.json" --out trends.txt
      - Keep a running record header. Append a dated log row; skip if that date+opponent row already exists. Do NOT put L-cancel / wavedash / ledgedash bullets here.
    - **`Melee Coach/Progress.md`** — the dashboard (this is where **tech-skill** focuses live). Regenerate each run from `trends.txt`: the metric trajectory table (includes **SDs/game**, no "stocks lost"), the per-matchup record table, and a terse **Current focuses** list built from the fixes you gave in step 5 plus any `fix: open` items — not invented from the metrics. Overwrite.
 
-7. **Coach in chat — present BOTH layers:**
+8. **Coach in chat — present BOTH layers:**
    - This session's headline stats + pro-baseline gaps (from `session.txt`).
    - Long-term trends (from `trends.txt`): call out what's **improving** vs **declining** vs **stuck**, and per-matchup records.
    - Echo back the fixes you committed to in step 5, and list any `fix: open` items still outstanding — don't substitute your own advice for them. **Coaching style (important):** when offering the step-5 tentatives or framing any gap, never frame the takeaway as "play slower / more patient / less movement." Lean toward fast-play tech (L-cancel, out-of-shield punishes, ledgedash fall-to-DJ timing), conversion, and edgeguard execution. Surface data honestly; keep tentatives aligned with fast, aggressive development — but the recorded fix is always yours.
@@ -62,3 +76,4 @@ python coach.py trends --history "path/to/history.json" --out trends.txt
 - Coaching style for matchups: the *tentative levers* you offer (step 5) lean **flowchart / DI / spacing / kill-confirm**, never "play slower" — but the recorded fix is always your own. The notes capture your prescriptions; `fix: open` marks gaps still awaiting one.
 - **Re-processing a past session** (e.g. after a pipeline change): target its games with `session_review.py … --files <those .slp>` (overrides `--count`), then `coach.py ingest … --replace` to upsert the existing records with the new fields. Identify a date's games by the `YYYYMMDD` in the filename.
 - If a set shows `[no pro replays for X vs Y]`, `fetch_pro_replays.py` will add that matchup's baseline.
+- **Notable moments** (`session.json` → `sets[].moments`) only exist for sessions analyzed on the current pipeline — an older `session.json` has none, so re-run step 2 for that date's `--files` before exporting. "Missed edgeguard" = you contested the recovery and they still got back; free recoveries (never contested) are a separate habit and aren't in the list, and scrambles where you were launched offstage too are filtered out (you'd load in mid-knockback and get a useless rep).
