@@ -950,6 +950,7 @@ class EdgeguardTracker:
         self._dj_used      = False  # double jump used while offstage
         self._recovery_y   = None   # Y when recovery action (airdodge/helpless) initiated
         self._prev_state   = None
+        self._guard_ready  = False  # edgeguarder was actionable when the trip began
         self._challenged   = False  # edgeguarder did something (attack near edge,
                                     # ledge hog, or actually hit the recoverer)
         self._last_hit_move = None  # last move that connected during the recovery
@@ -982,6 +983,17 @@ class EdgeguardTracker:
                 self._prev_state = curr.state
                 self._challenged    = False
                 self._last_hit_move = None
+                # Was the edgeguarder actually in a position to edgeguard when
+                # this trip started? In a scramble both players end up offstage
+                # and this is still a genuine recovery situation — but it makes
+                # a useless practice rep, since you'd load in mid-knockback
+                # rather than standing over them. See session_review._set_moments.
+                self._guard_ready = (
+                    opp is not None
+                    and _sv(opp.state) not in DAMAGE_STATES
+                    and opp.state not in DAMAGE_FLY_STATES
+                    and abs(opp.x) <= self.ledge_x + 30
+                )
                 # Already in knockback when crossing the ledge line: the
                 # launching move is the prospective finisher, so a clean
                 # bair KO out the side reads "bair", not "edgehog".
@@ -1058,6 +1070,7 @@ class EdgeguardTracker:
             "converted":  converted,
             "challenged": self._challenged,
             "finish":     self._last_hit_move if converted else None,
+            "guard_ready": self._guard_ready,
         })
         self._active = False
 
@@ -1922,6 +1935,10 @@ class GameAnalyzer:
                     "neutral_win_by":      _count_contexts(opp_seqs, "winner_context", neutral_only=True),
                 },
                 "edgeguard": eg.summary(),
+                # Raw recovery trips behind that summary, frame-level — feeds
+                # the notable-moments list (session_review._set_moments) that
+                # export_savestates.py turns into Training Mode reps.
+                "edgeguard_trips": list(eg.situations),
             }
 
         return {

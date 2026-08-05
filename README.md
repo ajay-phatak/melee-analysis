@@ -11,6 +11,7 @@ Tooling for analyzing Super Smash Bros. Melee gameplay — fetches pro replay se
 - `set_review.py` — set-level (best-of-N) analysis, aggregating game reviews.
 - `session_review.py` — multi-set / session-level review (sets split by matchup; pro-baseline comparison; `--json` emits structured per-set records).
 - `coach.py` — long-term coach: persists each session's per-set records to a history file (`ingest`) and computes cross-session trends + per-matchup records (`trends`).
+- `export_savestates.py` — lists the notable moments of a session (missed edgeguards, deaths, best punishes) and exports them as Training Mode savestates so you can *retry* them.
 
 ## Setup
 
@@ -55,6 +56,40 @@ python coach.py trends --history path/to/history.json
 `history.json` is the source of truth (personal data — keep it out of shared repos). The
 `/melee-analysis` command (below) wires these together and can also write per-session, per-matchup,
 and dashboard notes to Obsidian.
+
+## Redo the moment: Training Mode savestates
+
+`session_review.py --json` also records the session's **notable moments** — every missed edgeguard,
+death, and best punish, with the frame each one starts at. `export_savestates.py` turns those into
+[Training Mode - Community Edition](https://github.com/UnclePunch/Training-Mode) savestates, so the
+edgeguard you dropped becomes a practice rep with your opponent's real recovery replaying against you.
+
+```bash
+# What did I miss this session? (missed edgeguards by default)
+python export_savestates.py list --json session.json
+
+# Export them into Dolphin's Card A folder as .gci savestates
+python export_savestates.py export --json session.json --pick 1,3,4
+```
+
+Requires [Training Mode - Community Edition](https://github.com/UnclePunch/Training-Mode) and a
+Dolphin whose Slot A is set to **GCI Folder**; the exporter writes into that folder (auto-detected,
+or pass `--out-dir`). The `.gci` construction is done by a small Rust sidecar in `savestate/`:
+
+```bash
+cd savestate && cargo build --release   # needs a Rust toolchain + network on first build
+```
+
+The binary isn't committed — build it once, or point `MELEE_SAVESTATE_EXE` at an existing copy.
+
+**Credits.** This part stands entirely on other people's work:
+[Fiction](https://github.com/Fiction52s)'s [Melee Improover](https://github.com/Fiction52s/Melee-Improover)
+is where the idea of turning replay moments into practiceable savestates comes from;
+[AlexanderHarrison](https://github.com/AlexanderHarrison)'s
+[`tm_replay`](https://github.com/AlexanderHarrison/tm_replay) and
+[`slp_parser`](https://github.com/AlexanderHarrison/slp_parser) do the actual savestate and
+memory-card construction (the sidecar only picks the frames and the port);
+[UnclePunch](https://github.com/UnclePunch) and Aitch's Training Mode - Community Edition loads them.
 
 ## Optional: install the analysis command (Claude Code)
 

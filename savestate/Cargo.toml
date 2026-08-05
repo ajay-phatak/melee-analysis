@@ -1,0 +1,22 @@
+[package]
+name = "nojohns-savestate"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "nojohns-savestate"
+path = "src/main.rs"
+
+# tm_replay does the actual .gci construction; slp_parser is its parser and is
+# used here directly to read the replay. Neither is pinned to a rev on purpose:
+# both sides must resolve to the SAME slp_parser (cargo unifies git deps by
+# URL + rev), and two different revs would be two incompatible copies of the
+# same types. Cargo.lock is committed, so builds stay reproducible anyway.
+[dependencies]
+tm_replay = { git = "https://github.com/AlexanderHarrison/tm_replay" }
+slp_parser = { git = "https://github.com/AlexanderHarrison/slp_parser" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+strip = true

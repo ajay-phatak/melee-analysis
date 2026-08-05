@@ -25,3 +25,9 @@ venv/
 .idea/
 .vscode/
 .claude/
+
+# Savestate exporter build artifacts + prebuilt binary
+savestate/target/
+savestate/dist/
+savestate/nojohns-savestate
+savestate/nojohns-savestate.exe
